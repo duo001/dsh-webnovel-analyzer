@@ -5,6 +5,8 @@ import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { DIMENSIONS, DIMENSION_MAP, PROVIDERS, PROVIDER_MAP, LIMITS } from './dimensions.js';
+import { loadTropes, queryTropes, getTropeById, facetVocabulary } from './trope-store.js';
+import { TROPE_CARD_SYSTEM, TROPE_CARD_USER, parseTropeCard } from './trope-prompts.js';
 
 export const inject = ['webServer', 'credentials'];
 
@@ -95,6 +97,33 @@ function resolveProviderSettings(config, providerId) {
   };
 }
 
+// 解析供应商连接参数与 API Key；返回 { error } 表示应直接向客户端报错
+async function resolveProviderAndKey(credentials, config, rawProviderId) {
+  const providerId = PROVIDER_MAP[rawProviderId] ? rawProviderId : config.activeProviderId;
+  const provider = resolveProviderSettings(config, providerId);
+  if (!provider?.baseURL) {
+    return { error: { status: 400, code: 'no-base-url', message: `供应商「${providerId}」未配置 Base URL，请在设置中填写。` } };
+  }
+  if (!provider.model) {
+    return { error: { status: 400, code: 'no-model', message: `供应商「${provider.label}」未配置模型名，请在设置中填写。` } };
+  }
+  let apiKey = '';
+  if (provider.auth === 'header') {
+    const resolved = await credentials.resolve(provider.credentialRef);
+    if (!resolved?.value) {
+      return {
+        error: {
+          status: 400, code: 'no-api-key',
+          message: `未配置「${provider.label}」的 API Key，请先在设置中填写凭证（${provider.credentialRef}）。`,
+          extra: { credentialRef: provider.credentialRef }
+        }
+      };
+    }
+    apiKey = resolved.value;
+  }
+  return { providerId, provider, apiKey };
+}
+
 // ---------- LLM 调用 ----------
 const SYSTEM_COMMON = `你是资深中文网文编辑与拆书专家，正在为一篇短篇网文做分维度拆解。
 硬性规则：
@@ -157,18 +186,15 @@ function extractUpstreamMessage(body) {
   }
 }
 
-async function callChatModel({ provider, apiKey, dimension, text, timeoutMs }) {
+async function callChatCompletion({ provider, apiKey, messages, temperature, timeoutMs }) {
   const url = `${provider.baseURL}/chat/completions`;
   const headers = { 'content-type': 'application/json' };
   if (provider.auth === 'header') headers.authorization = `Bearer ${apiKey}`;
 
   const body = {
     model: provider.model,
-    temperature: 0.4,
-    messages: [
-      { role: 'system', content: `${SYSTEM_COMMON}\n\n## 本维度分析要求\n${dimension.prompt}` },
-      { role: 'user', content: USER_GUARD(text) }
-    ]
+    temperature: typeof temperature === 'number' ? temperature : 0.4,
+    messages
   };
 
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
@@ -199,6 +225,19 @@ async function callChatModel({ provider, apiKey, dimension, text, timeoutMs }) {
     usage: json.usage || null,
     model: json.model || provider.model
   };
+}
+
+async function callChatModel({ provider, apiKey, dimension, text, timeoutMs }) {
+  return callChatCompletion({
+    provider,
+    apiKey,
+    temperature: 0.4,
+    timeoutMs,
+    messages: [
+      { role: 'system', content: `${SYSTEM_COMMON}\n\n## 本维度分析要求\n${dimension.prompt}` },
+      { role: 'user', content: USER_GUARD(text) }
+    ]
+  });
 }
 
 // ---------- 路由 ----------
@@ -333,33 +372,16 @@ export function apply(ctx) {
         }
 
         const config = await loadConfig();
-        const providerId = PROVIDER_MAP[body.providerId] ? body.providerId : config.activeProviderId;
-        const provider = resolveProviderSettings(config, providerId);
-        if (!provider?.baseURL) {
-          sendError(res, 400, 'no-base-url', `供应商「${providerId}」未配置 Base URL，请在设置中填写。`);
+        const providerResolved = await resolveProviderAndKey(credentials, config, body.providerId);
+        if (providerResolved.error) {
+          sendError(res, providerResolved.error.status, providerResolved.error.code, providerResolved.error.message, providerResolved.error.extra || {});
           return;
-        }
-        if (!provider.model) {
-          sendError(res, 400, 'no-model', `供应商「${provider.label}」未配置模型名，请在设置中填写。`);
-          return;
-        }
-
-        let apiKey = '';
-        if (provider.auth === 'header') {
-          const resolved = await credentials.resolve(provider.credentialRef);
-          if (!resolved?.value) {
-            sendError(res, 400, 'no-api-key', `未配置「${provider.label}」的 API Key，请先在设置中填写凭证（${provider.credentialRef}）。`, {
-              credentialRef: provider.credentialRef
-            });
-            return;
-          }
-          apiKey = resolved.value;
         }
 
         const startedAt = Date.now();
         const result = await callChatModel({
-          provider,
-          apiKey,
+          provider: providerResolved.provider,
+          apiKey: providerResolved.apiKey,
           dimension,
           text,
           timeoutMs: config.timeoutMs
@@ -367,11 +389,102 @@ export function apply(ctx) {
         sendJson(res, 200, {
           ok: true,
           dimensionId,
-          providerId,
+          providerId: providerResolved.providerId,
           model: result.model,
           elapsedMs: Date.now() - startedAt,
           charCount,
           markdown: result.content,
+          usage: result.usage
+        });
+        return;
+      }
+
+      // ---------- 热梗库 ----------
+      // GET /tropes/facets —— 四个筛选分面（弧线/机制/题材/设定，带计数）
+      if (method === 'GET' && path === '/tropes/facets') {
+        const store = await loadTropes();
+        sendJson(res, 200, { ok: true, facets: facetVocabulary(), source: store.source, syncedAt: store.syncedAt, total: store.total });
+        return;
+      }
+
+      // GET /tropes/:id —— 单条热梗完整卡片（富卡片含四件套/情绪引擎/虐点/高光）
+      const tropeDetailMatch = path.match(/^\/tropes\/([^/]+)$/);
+      if (method === 'GET' && tropeDetailMatch && path !== '/tropes') {
+        await loadTropes();
+        const trope = getTropeById(decodeURIComponent(tropeDetailMatch[1]));
+        if (!trope) {
+          sendError(res, 404, 'trope-not-found', '未找到该热梗卡片。');
+          return;
+        }
+        sendJson(res, 200, { ok: true, trope });
+        return;
+      }
+
+      // GET /tropes?arc=&mechanism=&genre=&setting=&q=&richOnly=&page=&pageSize=
+      if (method === 'GET' && path === '/tropes') {
+        await loadTropes();
+        const result = queryTropes({
+          arc: url.searchParams.get('arc') || '',
+          mechanism: url.searchParams.get('mechanism') || '',
+          genre: url.searchParams.get('genre') || '',
+          setting: url.searchParams.get('setting') || '',
+          q: url.searchParams.get('q') || '',
+          richOnly: url.searchParams.get('richOnly') === '1'
+        }, {
+          page: Number(url.searchParams.get('page')) || 1,
+          pageSize: Number(url.searchParams.get('pageSize')) || 24
+        });
+        sendJson(res, 200, { ok: true, ...result });
+        return;
+      }
+
+      // POST /trope-card —— AI 从素材生成热梗卡片（同构 schema + 各维度写法 playbook）
+      if (method === 'POST' && path === '/trope-card') {
+        const body = await readJsonBody(req);
+        const text = typeof body.text === 'string' ? body.text : '';
+        if (!text.trim()) {
+          sendError(res, 400, 'empty-text', '素材为空，请粘贴故事点子、梗概或小说原文。');
+          return;
+        }
+        const charCount = [...text].length;
+        if (charCount > LIMITS.maxChars) {
+          sendError(res, 413, 'text-too-long', `素材 ${charCount} 字，超过单篇 ${LIMITS.maxChars} 字上限。`, { charCount });
+          return;
+        }
+
+        const config = await loadConfig();
+        const resolved = await resolveProviderAndKey(credentials, config, body.providerId);
+        if (resolved.error) {
+          sendError(res, resolved.error.status, resolved.error.code, resolved.error.message, resolved.error.extra || {});
+          return;
+        }
+
+        const startedAt = Date.now();
+        const result = await callChatCompletion({
+          provider: resolved.provider,
+          apiKey: resolved.apiKey,
+          temperature: 0.3,
+          timeoutMs: config.timeoutMs,
+          messages: [
+            { role: 'system', content: TROPE_CARD_SYSTEM },
+            { role: 'user', content: TROPE_CARD_USER(text) }
+          ]
+        });
+
+        let card;
+        try {
+          card = parseTropeCard(result.content);
+        } catch (err) {
+          sendError(res, 502, 'card-parse-failed', '热梗卡片生成失败：' + err.message + '（可换用更强的模型重试）');
+          return;
+        }
+        sendJson(res, 200, {
+          ok: true,
+          providerId: resolved.providerId,
+          model: result.model,
+          elapsedMs: Date.now() - startedAt,
+          charCount,
+          card,
           usage: result.usage
         });
         return;

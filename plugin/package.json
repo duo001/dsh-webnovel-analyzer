@@ -1,13 +1,15 @@
 {
   "name": "@local/webnovel-analyzer",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
-  "description": "短篇网文拆文分析工具：上传 .txt 原文，22 个维度并发调用可切换的 OpenAI 兼容大模型，逐维度输出分析报告。",
+  "description": "短篇网文拆文分析工具：22 维并发 LLM 分析、240 条网络热梗库检索、AI 热梗卡片生成（四件套+各维度网文写法）。",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
     "./dimensions": "./dimensions.js",
+    "./trope-store": "./trope-store.js",
+    "./trope-prompts": "./trope-prompts.js",
     "./locale/zh.json": "./locale/zh.json",
     "./locale/en.json": "./locale/en.json",
     "./icon": "./icon.svg"
@@ -16,7 +18,10 @@
     "index.js",
     "client.js",
     "dimensions.js",
+    "trope-store.js",
+    "trope-prompts.js",
     "sample.txt",
+    "data",
     "cordis.patch.yml",
     "locale",
     "icon.svg"

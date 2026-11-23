@@ -12,7 +12,7 @@ window.__ModuleLoader__.load({
     const PANEL_ID = 'webnovel-analyzer';
     const API = '/webnovel';
     // 构建标记：白屏/缓存排查用，硬刷新后标题处应显示该标记
-    const BUILD_TAG = 'v0.1.1';
+    const BUILD_TAG = 'v0.1.2';
 
     // ---------------- 基础工具 ----------------
     function api(path, options) {
@@ -290,8 +290,202 @@ window.__ModuleLoader__.load({
         }));
     }
 
-    // ---------------- 主面板 ----------------
-    function Panel() {
+    // ---------------- 热梗库 ----------------
+    function Chip(props) {
+      const { active, onClick, children, title } = props;
+      return h('button', {
+        type: 'button',
+        className: 'wn-chip' + (active ? ' active' : ''),
+        onClick, title
+      }, children);
+    }
+
+    function TagList(props) {
+      const items = props.items || [];
+      if (!items.length) return null;
+      return h('span', { className: 'wn-tag-row' },
+        items.map((t, i) => h('span', { key: i, className: 'wn-tag' }, t)));
+    }
+
+    function TropeDetailModal(props) {
+      const { trope, onClose } = props;
+      if (!trope) return null;
+      const fk = trope.fourKit || {};
+      const rich = trope.rich;
+      const kit = [
+        ['🎯 动机', fk.motive], ['🚧 底线', fk.bottomline],
+        ['🔀 反差', fk.contrast], ['⚔️ 动作部署', fk.move]
+      ].filter(([, v]) => v);
+
+      return h('div', { className: 'wn-modal-mask', onClick: onClose },
+        h('div', { className: 'wn-modal wn-trope-modal', onClick: (e) => e.stopPropagation() },
+          h('div', { className: 'wn-modal-head' },
+            h('strong', null, trope.title),
+            h('button', { className: 'wn-modal-x', onClick: onClose, 'aria-label': '关闭' }, '×')),
+          h('div', { className: 'wn-modal-body' },
+            h('div', { className: 'wn-trope-tags' },
+              trope.arc && h('span', { className: 'wn-tag wn-tag-arc' }, trope.arc),
+              h(TagList, { items: trope.mechanisms }),
+              h(TagList, { items: trope.genres }),
+              h(TagList, { items: trope.settings })),
+            h('div', { className: 'wn-kv' },
+              h('span', { className: 'wn-kv-k' }, '一句话梗概'),
+              h('p', { className: 'wn-kv-v' }, trope.oneLine || '—')),
+            h('div', { className: 'wn-kv' },
+              h('span', { className: 'wn-kv-k' }, '卖点'),
+              h('p', { className: 'wn-kv-v' }, trope.sellingPoint || '—')),
+            kit.length > 0 && h('div', { className: 'wn-kit-grid' },
+              kit.map(([label, v]) => h('div', { key: label, className: 'wn-kit-cell' },
+                h('strong', null, label), h('p', null, v)))),
+            rich && trope.emotionEngine && h('div', { className: 'wn-kv' },
+              h('span', { className: 'wn-kv-k' }, '🎢 情绪引擎'),
+              h('p', { className: 'wn-kv-v' }, trope.emotionEngine)),
+            rich && trope.painPoints && trope.painPoints.length > 0 && h('div', { className: 'wn-kv' },
+              h('span', { className: 'wn-kv-k' }, '💔 虐点'),
+              h('ul', { className: 'wn-bullet' }, trope.painPoints.map((p, i) => h('li', { key: i }, p)))),
+            rich && trope.highlights && trope.highlights.length > 0 && h('div', { className: 'wn-kv' },
+              h('span', { className: 'wn-kv-k' }, '✨ 高光名场面'),
+              h('ul', { className: 'wn-bullet' }, trope.highlights.map((p, i) => h('li', { key: i }, p)))),
+            !rich && h('p', { className: 'wn-modal-tip' }, '该条目为精简卡片，暂无四件套/情绪引擎等深度字段；可在上方筛选「仅看富卡片」。'))));
+    }
+
+    function TropeLibrary() {
+      const [facets, setFacets] = useState(null);
+      const [meta, setMeta] = useState({ total: 0, source: '' });
+      const [filters, setFilters] = useState({ arc: '', mechanism: '', genre: '', setting: '', q: '', richOnly: false });
+      const [page, setPage] = useState(1);
+      const [items, setItems] = useState([]);
+      const [total, setTotal] = useState(0);
+      const [hasMore, setHasMore] = useState(false);
+      const [loading, setLoading] = useState(false);
+      const [error, setError] = useState(null);
+      const [detail, setDetail] = useState(null);
+      const [detailLoading, setDetailLoading] = useState(false);
+      const searchRef = useRef(null);
+
+      async function loadFacets() {
+        try {
+          const data = await api('/tropes/facets');
+          setFacets(data.facets);
+          setMeta({ total: data.total, source: data.source });
+        } catch (err) {
+          setError('加载热梗分面失败：' + err.message);
+        }
+      }
+      useEffect(() => { loadFacets(); }, []);
+
+      async function loadList(nextPage, reset) {
+        setLoading(true); setError(null);
+        try {
+          const params = new URLSearchParams();
+          for (const [k, v] of Object.entries(filters)) {
+            if (v) params.set(k, v === true ? '1' : v);
+          }
+          params.set('page', nextPage);
+          params.set('pageSize', '24');
+          const data = await api('/tropes?' + params.toString());
+          setItems((prev) => reset ? data.items : prev.concat(data.items));
+          setTotal(data.total);
+          setHasMore(data.hasMore);
+          setPage(data.page);
+        } catch (err) {
+          setError('加载热梗列表失败：' + err.message);
+        } finally {
+          setLoading(false);
+        }
+      }
+      useEffect(() => { loadList(1, true); /* eslint-disable-line */ }, [filters]);
+
+      function pickFacet(key, value) {
+        setFilters((prev) => ({ ...prev, [key]: prev[key] === value ? '' : value }));
+      }
+      function submitSearch(e) {
+        e.preventDefault();
+        setFilters((prev) => ({ ...prev, q: (searchRef.current?.value || '').trim() }));
+      }
+      function resetFilters() {
+        if (searchRef.current) searchRef.current.value = '';
+        setFilters({ arc: '', mechanism: '', genre: '', setting: '', q: '', richOnly: false });
+      }
+      async function openDetail(id) {
+        setDetailLoading(true); setDetail(null);
+        try {
+          const data = await api('/tropes/' + encodeURIComponent(id));
+          setDetail(data.trope);
+        } catch (err) {
+          setError('加载卡片详情失败：' + err.message);
+        } finally {
+          setDetailLoading(false);
+        }
+      }
+
+      const facetBlock = (key) => facets && facets[key] && h('div', { className: 'wn-facet-row' },
+        h('span', { className: 'wn-facet-label' }, facets[key].label),
+        h('div', { className: 'wn-facet-chips' },
+          facets[key].values.map((v) => h(Chip, {
+            key: v.name,
+            active: filters[key] === v.name,
+            title: `${v.count} 条`,
+            onClick: () => pickFacet(key, v.name)
+          }, v.name, h('em', { className: 'wn-chip-count' }, v.count)))));
+
+      const activeCount = Object.values(filters).filter((v) => v).length;
+
+      return h('div', { className: 'wn-trope-lib' },
+        h('div', { className: 'wn-section' },
+          h('div', { className: 'wn-dim-head' },
+            h('h2', { className: 'wn-h2' }, `🔥 热梗库（${meta.total || 240} 条）`),
+            h('label', { className: 'wn-rich-toggle' },
+              h('input', {
+                type: 'checkbox',
+                checked: filters.richOnly,
+                onChange: (e) => setFilters((prev) => ({ ...prev, richOnly: e.target.checked }))
+              }), '仅看富卡片')),
+          h('p', { className: 'wn-tip' },
+            '数据来源：', meta.source || 'ludan.pro 公开收录', '。富卡片含四件套（动机/底线/反差/动作）、情绪引擎、虐点与高光名场面；点卡片查看详情。'),
+          h('form', { className: 'wn-search-row', onSubmit: submitSearch },
+            h('input', {
+              ref: searchRef, type: 'search', className: 'wn-search-input',
+              placeholder: '搜索标题 / 梗概 / 卖点关键词，如「孟婆」「圣旨」',
+              defaultValue: filters.q
+            }),
+            h('button', { type: 'submit', className: 'wn-btn wn-btn-primary wn-btn-sm' }, '搜索'),
+            h('button', { type: 'button', className: 'wn-btn wn-btn-ghost wn-btn-sm', onClick: resetFilters }, '重置')),
+          facetBlock('arc'),
+          facetBlock('mechanism'),
+          facetBlock('genre'),
+          facetBlock('setting')),
+
+        error && h('p', { className: 'wn-notice err' }, error),
+        h('p', { className: 'wn-selected-count' },
+          `命中 ${total} 条${activeCount ? ` · ${activeCount} 个筛选生效中` : ''}`),
+
+        h('div', { className: 'wn-trope-grid' },
+          items.map((t) => h('button', {
+            key: t.id, type: 'button', className: 'wn-trope-card',
+            onClick: () => openDetail(t.id)
+          },
+            h('div', { className: 'wn-trope-card-head' },
+              h('strong', { className: 'wn-trope-title' }, t.title),
+              t.rich && h('span', { className: 'wn-rich-badge', title: '含四件套/情绪引擎/虐点/高光' }, '富')),
+            h('p', { className: 'wn-trope-oneline' }, t.oneLine),
+            h('div', { className: 'wn-trope-tags' },
+              t.arc && h('span', { className: 'wn-tag wn-tag-arc' }, t.arc),
+              h(TagList, { items: (t.mechanisms || []).slice(0, 2) }),
+              h(TagList, { items: (t.genres || []).slice(0, 3) }))))),
+
+        loading && h('div', { className: 'wn-loadmore' }, Spinner(), ' 加载中…'),
+        !loading && detailLoading && h('div', { className: 'wn-loadmore' }, Spinner(), ' 打开详情…'),
+        !loading && hasMore && h('div', { className: 'wn-loadmore' },
+          h('button', { className: 'wn-btn wn-btn-ghost', onClick: () => loadList(page + 1, false) }, '加载更多')),
+        !loading && !hasMore && items.length > 0 && h('p', { className: 'wn-selected-count' }, '— 已到底 —'),
+        !loading && items.length === 0 && h('div', { className: 'wn-boundary' }, '没有命中的热梗，试试调整筛选或关键词。'),
+
+        h(TropeDetailModal, { trope: detail, onClose: () => setDetail(null) }));
+    }
+
+    // ---------------- 拆文分析面板（原主面板） ----------------
+    function AnalyzePanel() {
       const [dimensions, setDimensions] = useState([]);
       const [limits, setLimits] = useState({ maxChars: 30000, recommendedMin: 8000, recommendedMax: 20000 });
       const [providers, setProviders] = useState([]);
@@ -535,6 +729,238 @@ window.__ModuleLoader__.load({
         }));
     }
 
+    // ---------------- AI 热梗卡片生成 ----------------
+    function cardToMarkdown(card) {
+      const L = [];
+      L.push(`# ${card.title}`);
+      if (card.arc || card.mechanisms.length || card.genres.length) {
+        L.push('');
+        L.push('> ' + [card.arc, ...card.mechanisms, ...card.genres, ...card.settings].filter(Boolean).join(' / '));
+      }
+      L.push('', '## 一句话梗概', card.oneLine || '—');
+      L.push('', '## 卖点', card.sellingPoint || '—');
+      L.push('', '## 四件套');
+      L.push(`- **动机**：${card.fourKit.motive || '—'}`);
+      L.push(`- **底线**：${card.fourKit.bottomline || '—'}`);
+      L.push(`- **反差**：${card.fourKit.contrast || '—'}`);
+      L.push(`- **动作部署**：${card.fourKit.move || '—'}`);
+      if (card.emotionEngine) L.push('', '## 情绪引擎', card.emotionEngine);
+      if (card.painPoints.length) L.push('', '## 虐点', ...card.painPoints.map((p) => `- ${p}`));
+      if (card.highlights.length) L.push('', '## 高光名场面', ...card.highlights.map((p) => `- ${p}`));
+      if (card.playbook.length) {
+        L.push('', '## 各维度可用网文写法');
+        for (const p of card.playbook) L.push(`### ${p.dimensionName || p.dimensionId}`, p.play);
+      }
+      return L.join('\n');
+    }
+
+    async function copyText(text) {
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+          return true;
+        }
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        ta.remove();
+        return ok;
+      } catch {
+        return false;
+      }
+    }
+
+    function GeneratedCard(props) {
+      const { card, dimensionMap } = props;
+      const [copied, setCopied] = useState(false);
+      const fk = card.fourKit || {};
+      const kit = [
+        ['🎯 动机', fk.motive], ['🚧 底线', fk.bottomline],
+        ['🔀 反差', fk.contrast], ['⚔️ 动作部署', fk.move]
+      ].filter(([, v]) => v);
+
+      async function onCopy() {
+        const enriched = {
+          ...card,
+          playbook: card.playbook.map((p) => ({ ...p, dimensionName: dimensionMap[p.dimensionId]?.name || p.dimensionId }))
+        };
+        const ok = await copyText(cardToMarkdown(enriched));
+        if (ok) { setCopied(true); setTimeout(() => setCopied(false), 1800); }
+      }
+
+      return h('div', { className: 'wn-gen-card' },
+        h('div', { className: 'wn-gen-head' },
+          h('h2', { className: 'wn-h2' }, '🃏 ' + card.title),
+          h('button', { className: 'wn-btn wn-btn-ghost wn-btn-sm', onClick: onCopy }, copied ? '✓ 已复制' : '复制 Markdown')),
+        h('div', { className: 'wn-trope-tags' },
+          card.arc && h('span', { className: 'wn-tag wn-tag-arc' }, card.arc),
+          h(TagList, { items: card.mechanisms }),
+          h(TagList, { items: card.genres }),
+          h(TagList, { items: card.settings })),
+        h('div', { className: 'wn-kv' },
+          h('span', { className: 'wn-kv-k' }, '一句话梗概'), h('p', { className: 'wn-kv-v' }, card.oneLine || '—')),
+        h('div', { className: 'wn-kv' },
+          h('span', { className: 'wn-kv-k' }, '卖点'), h('p', { className: 'wn-kv-v' }, card.sellingPoint || '—')),
+        kit.length > 0 && h('div', { className: 'wn-kit-grid' },
+          kit.map(([label, v]) => h('div', { key: label, className: 'wn-kit-cell' },
+            h('strong', null, label), h('p', null, v)))),
+        card.emotionEngine && h('div', { className: 'wn-kv' },
+          h('span', { className: 'wn-kv-k' }, '🎢 情绪引擎'), h('p', { className: 'wn-kv-v' }, card.emotionEngine)),
+        card.painPoints.length > 0 && h('div', { className: 'wn-kv' },
+          h('span', { className: 'wn-kv-k' }, '💔 虐点'),
+          h('ul', { className: 'wn-bullet' }, card.painPoints.map((p, i) => h('li', { key: i }, p)))),
+        card.highlights.length > 0 && h('div', { className: 'wn-kv' },
+          h('span', { className: 'wn-kv-k' }, '✨ 高光名场面'),
+          h('ul', { className: 'wn-bullet' }, card.highlights.map((p, i) => h('li', { key: i }, p)))),
+        card.playbook.length > 0 && h('div', { className: 'wn-kv' },
+          h('span', { className: 'wn-kv-k' }, '📐 各维度可用网文写法'),
+          h('div', { className: 'wn-playbook' },
+            card.playbook.map((p, i) => {
+              const meta = dimensionMap[p.dimensionId];
+              return h('div', { key: i, className: 'wn-play-cell' },
+                h('div', { className: 'wn-play-dim' },
+                  h('span', { className: 'wn-dim-emoji' }, meta?.emoji || '📝'),
+                  h('strong', null, meta?.name || p.dimensionId)),
+                h('p', null, p.play));
+            }))));
+    }
+
+    function TropeCardGenerator() {
+      const [text, setText] = useState('');
+      const [limits, setLimits] = useState({ maxChars: 30000 });
+      const [providers, setProviders] = useState([]);
+      const [activeProviderId, setActiveProviderId] = useState('');
+      const [generating, setGenerating] = useState(false);
+      const [card, setCard] = useState(null);
+      const [error, setError] = useState(null);
+      const [elapsed, setElapsed] = useState(null);
+      const [notice, setNotice] = useState(null);
+      const [showSettings, setShowSettings] = useState(false);
+      const [dimensionMap, setDimensionMap] = useState({});
+
+      useEffect(() => {
+        api('/dimensions').then((data) => {
+          setLimits(data.limits);
+          const map = {};
+          for (const d of data.dimensions) map[d.id] = d;
+          setDimensionMap(map);
+        }).catch((err) => setNotice('加载维度失败：' + err.message));
+        api('/providers').then((data) => {
+          setProviders(data.providers);
+          setActiveProviderId(data.activeProviderId);
+        }).catch((err) => setNotice('加载供应商失败：' + err.message));
+      }, []);
+
+      const charCount = useMemo(() => [...text].length, [text]);
+      const overLimit = charCount > limits.maxChars;
+      const activeProvider = providers.find((p) => p.id === activeProviderId);
+      const keyReady = !activeProvider || activeProvider.auth === 'none' || activeProvider.configured;
+
+      async function generate() {
+        if (!text.trim()) { setError(null); setNotice('请先粘贴故事点子、梗概或小说原文。'); return; }
+        if (overLimit) { setError(null); setNotice(`素材超过 ${limits.maxChars} 字上限。`); return; }
+        if (!keyReady) { setShowSettings(true); return; }
+        setNotice(null); setError(null); setCard(null); setGenerating(true);
+        try {
+          const data = await api('/trope-card', {
+            method: 'POST',
+            body: JSON.stringify({ text, providerId: activeProviderId })
+          });
+          setCard(data.card);
+          setElapsed({ ms: data.elapsedMs, model: data.model });
+        } catch (err) {
+          setError(err.message || '生成失败');
+        } finally {
+          setGenerating(false);
+        }
+      }
+
+      return h('div', { className: 'wn-trope-gen' },
+        h('div', { className: 'wn-section' },
+          h('div', { className: 'wn-dim-head' },
+            h('h2', { className: 'wn-h2' }, '🃏 AI 热梗卡片生成'),
+            h('span', { className: 'wn-provider-label' },
+              '模型：', activeProvider ? activeProvider.label : '加载中…',
+              activeProvider && activeProvider.auth === 'header' &&
+                h('em', { className: keyReady ? 'wn-key-ok' : 'wn-key-miss' }, keyReady ? ' ●已配' : ' ○未配'),
+              h('button', { className: 'wn-btn wn-btn-ghost wn-btn-sm', style: { marginLeft: 8 }, onClick: () => setShowSettings(true) }, '⚙ 设置'))),
+          h('p', { className: 'wn-tip' },
+            '粘贴一个故事点子、梗概或原文，AI 按热梗库同构 schema 提炼四件套（动机/底线/反差/动作）、情绪引擎、虐点与高光名场面，并给出 6-8 个分析维度下可直接落笔的网文写法。'),
+          h('div', { className: 'wn-textarea-head' },
+            h('span', null, '素材内容'),
+            h('span', { className: overLimit ? 'wn-count wn-bad' : 'wn-count' }, `${charCount} / ${limits.maxChars} 字`)),
+          h('textarea', {
+            className: 'wn-textarea' + (overLimit ? ' bad' : ''),
+            style: { minHeight: 200 },
+            value: text,
+            placeholder: '例：婚礼上，交往八年的男友把捧花送给了实习生，说她更需要被照顾。我当场脱下戒指转身离开，三年后嫁给了别人，他却带着车队堵在我公司楼下…',
+            onChange: (e) => setText(e.target.value)
+          })),
+
+        h('div', { className: 'wn-action-bar' },
+          notice && h('span', { className: 'wn-notice err' }, notice),
+          h('button', {
+            className: 'wn-btn wn-btn-gold wn-btn-start',
+            disabled: generating,
+            onClick: generate
+          }, generating ? '生成中，通常 10-20 秒…' : '✨ 生成热梗卡片')),
+
+        generating && h('div', { className: 'wn-result-card wn-running' },
+          h('div', { className: 'wn-result-head' }, h('strong', null, '🃏 热梗卡片'), h('span', { className: 'wn-result-meta' }, Spinner(), ' AI 提炼中…')),
+          h('div', { className: 'wn-skeleton' },
+            h('div', { className: 'wn-sk-line w3' }), h('div', { className: 'wn-sk-line w2' }),
+            h('div', { className: 'wn-sk-line w3' }), h('div', { className: 'wn-sk-line w1' }))),
+
+        error && h('div', { className: 'wn-result-card wn-error-card' },
+          h('div', { className: 'wn-result-head' }, h('strong', null, '生成失败')),
+          h('p', { className: 'wn-error-text' }, error),
+          h('button', { className: 'wn-btn wn-btn-ghost wn-btn-sm', onClick: generate }, '重试')),
+
+        card && h(GeneratedCard, { card, dimensionMap }),
+        card && elapsed && h('p', { className: 'wn-selected-count' },
+          `生成耗时 ${(elapsed.ms / 1000).toFixed(1)}s · 模型 ${elapsed.model || '-'}`),
+
+        showSettings && h(SettingsModal, {
+          providers, activeProviderId, timeoutMs: 180000,
+          onClose: () => setShowSettings(false),
+          onSaved: () => api('/providers').then((data) => {
+            setProviders(data.providers);
+            setActiveProviderId(data.activeProviderId);
+          })
+        }));
+    }
+
+    // ---------------- 主面板：Tab 外壳 ----------------
+    function Panel() {
+      const [tab, setTab] = useState('analyze'); // analyze | library | generator
+      return h('div', { className: 'wn-shell' },
+        h('div', { className: 'wn-tabbar' },
+          h('button', {
+            type: 'button',
+            className: 'wn-tab' + (tab === 'analyze' ? ' active' : ''),
+            onClick: () => setTab('analyze')
+          }, '📖 拆文分析'),
+          h('button', {
+            type: 'button',
+            className: 'wn-tab' + (tab === 'library' ? ' active' : ''),
+            onClick: () => setTab('library')
+          }, '🔥 热梗库'),
+          h('button', {
+            type: 'button',
+            className: 'wn-tab' + (tab === 'generator' ? ' active' : ''),
+            onClick: () => setTab('generator')
+          }, '🃏 热梗卡生成'),
+          h('span', { className: 'wn-build' }, BUILD_TAG)),
+        h('div', { className: 'wn-tab-body' },
+          tab === 'analyze' && h(AnalyzePanel),
+          tab === 'library' && h(TropeLibrary),
+          tab === 'generator' && h(TropeCardGenerator)));
+    }
+
     // 侧边栏图标（ownerProps 提供 size/active）
     function PanelIcon(props) {
       const size = (props && props.size) || 20;
@@ -551,7 +977,14 @@ window.__ModuleLoader__.load({
     }
 
     const CSS = `
-.wn-panel { display:flex; flex-direction:column; flex:1 1 auto; min-height:0; height:auto; overflow-y:auto; box-sizing:border-box; padding: 20px 28px 60px; max-width: 1080px; width:100%; margin: 0 auto; color: var(--dsw-alias-label-primary); font-size: 14px; line-height: 1.6; }
+.wn-shell { display:flex; flex-direction:column; flex:1 1 auto; min-height:0; width:100%; overflow:hidden; }
+.wn-tabbar { display:flex; align-items:center; gap: 4px; padding: 10px 28px 0; max-width: 1080px; width:100%; margin: 0 auto; box-sizing:border-box; border-bottom: 1px solid var(--dsw-alias-border-l1); flex-shrink: 0; }
+.wn-tab { border: none; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 14px; font-weight: 600; padding: 9px 16px; cursor: pointer; border-bottom: 2px solid transparent; border-radius: 8px 8px 0 0; font-family: inherit; }
+.wn-tab:hover { color: var(--dsw-alias-label-primary); }
+.wn-tab.active { color: var(--dsw-alias-brand-primary); border-bottom-color: var(--dsw-alias-brand-primary); }
+.wn-tab-body { flex:1 1 auto; min-height:0; overflow-y:auto; }
+.wn-panel { display:flex; flex-direction:column; box-sizing:border-box; padding: 20px 28px 60px; max-width: 1080px; width:100%; margin: 0 auto; color: var(--dsw-alias-label-primary); font-size: 14px; line-height: 1.6; }
+.wn-trope-lib, .wn-trope-gen { display:flex; flex-direction:column; box-sizing:border-box; padding: 20px 28px 60px; max-width: 1080px; width:100%; margin: 0 auto; color: var(--dsw-alias-label-primary); font-size: 14px; line-height: 1.6; }
 .wn-header { display:flex; align-items:center; justify-content:space-between; margin-bottom: 18px; }
 .wn-title { font-size: 20px; font-weight: 700; margin: 0; display: inline; }
 .wn-build { font-size: 10px; color: var(--dsw-alias-label-secondary); margin-left: 8px; vertical-align: middle; }
@@ -647,6 +1080,50 @@ window.__ModuleLoader__.load({
 .wn-md .wn-md-table th { background: var(--dsw-alias-bg-layer-1); font-weight: 700; }
 .wn-md a { color: var(--dsw-alias-brand-primary); }
 .wn-md strong { font-weight: 700; }
+/* 热梗库 */
+.wn-search-row { display:flex; gap: 8px; margin-bottom: 12px; }
+.wn-search-input { flex:1; border-radius: 9px; border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); padding: 8px 12px; font-size: 13px; outline: none; font-family: inherit; }
+.wn-search-input:focus { border-color: var(--dsw-alias-brand-primary); }
+.wn-rich-toggle { display:inline-flex; align-items:center; gap: 5px; font-size: 12.5px; color: var(--dsw-alias-label-secondary); cursor: pointer; font-weight: 400; }
+.wn-rich-toggle input { accent-color: #f0a020; }
+.wn-facet-row { display:flex; gap: 10px; align-items: flex-start; margin: 10px 0; }
+.wn-facet-label { flex-shrink: 0; width: 42px; font-size: 12.5px; color: var(--dsw-alias-label-secondary); padding-top: 5px; }
+.wn-facet-chips { display:flex; flex-wrap: wrap; gap: 6px; }
+.wn-chip { border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); border-radius: 999px; padding: 4px 11px; font-size: 12px; cursor: pointer; font-family: inherit; display:inline-flex; align-items:center; gap:5px; transition: all .15s; }
+.wn-chip:hover { border-color: var(--dsw-alias-brand-primary); }
+.wn-chip.active { background: rgba(240,160,32,.16); border-color: #f0a020; color: #b9760a; font-weight: 600; }
+.wn-chip-count { font-style: normal; font-size: 10.5px; opacity: .65; font-variant-numeric: tabular-nums; }
+.wn-trope-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; margin-top: 12px; }
+.wn-trope-card { display:flex; flex-direction:column; gap: 8px; text-align: left; padding: 14px 15px; border-radius: 12px; border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); cursor: pointer; transition: all .15s; font-family: inherit; }
+.wn-trope-card:hover { border-color: var(--dsw-alias-brand-primary); box-shadow: 0 4px 16px rgba(0,0,0,.08); transform: translateY(-1px); }
+.wn-trope-card-head { display:flex; align-items:flex-start; justify-content:space-between; gap: 8px; }
+.wn-trope-title { font-size: 14px; font-weight: 700; line-height: 1.4; }
+.wn-rich-badge { flex-shrink: 0; font-size: 10.5px; font-weight: 700; color: #fff; background: linear-gradient(135deg, #f6b73c, #ef9f1c); border-radius: 6px; padding: 1px 6px; }
+.wn-trope-oneline { font-size: 12.5px; color: var(--dsw-alias-label-secondary); line-height: 1.65; margin: 0; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.wn-trope-tags { display:flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.wn-tag-row { display:inline-flex; flex-wrap: wrap; gap: 5px; }
+.wn-tag { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1); color: var(--dsw-alias-label-secondary); white-space: nowrap; }
+.wn-tag-arc { background: rgba(240,160,32,.12); border-color: rgba(240,160,32,.45); color: #b9760a; font-weight: 600; }
+.wn-loadmore { text-align: center; padding: 18px 0; color: var(--dsw-alias-label-secondary); font-size: 13px; display:flex; align-items:center; justify-content:center; gap: 7px; }
+.wn-trope-modal { width: min(720px, 94vw); }
+.wn-kv { margin: 12px 0; }
+.wn-kv-k { display:block; font-size: 12.5px; font-weight: 700; color: var(--dsw-alias-brand-primary); margin-bottom: 4px; }
+.wn-kv-v { margin: 0; font-size: 13.5px; line-height: 1.7; color: var(--dsw-alias-label-primary); white-space: pre-wrap; }
+.wn-kit-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 12px 0; }
+.wn-kit-cell { background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; padding: 10px 12px; }
+.wn-kit-cell strong { display:block; font-size: 12.5px; margin-bottom: 5px; color: var(--dsw-alias-label-primary); }
+.wn-kit-cell p { margin: 0; font-size: 12.5px; line-height: 1.65; color: var(--dsw-alias-label-secondary); white-space: pre-wrap; }
+.wn-bullet { margin: 4px 0 0; padding-left: 20px; font-size: 13px; line-height: 1.75; }
+.wn-bullet li { margin: 3px 0; }
+/* AI 生成卡片 */
+.wn-gen-card { background: var(--dsw-alias-bg-base); border: 1px solid var(--dsw-alias-border-l1); border-radius: 14px; padding: 20px 22px; margin-top: 16px; }
+.wn-gen-head { display:flex; align-items:center; justify-content:space-between; gap: 10px; margin-bottom: 12px; }
+.wn-gen-head .wn-h2 { margin: 0; }
+.wn-playbook { display:flex; flex-direction:column; gap: 10px; margin-top: 6px; }
+.wn-play-cell { border: 1px solid var(--dsw-alias-border-l1); border-left: 3px solid var(--dsw-alias-brand-primary); border-radius: 8px; padding: 10px 13px; background: var(--dsw-alias-bg-layer-1); }
+.wn-play-dim { display:flex; align-items:center; gap: 6px; margin-bottom: 5px; font-size: 13px; }
+.wn-play-cell p { margin: 0; font-size: 13px; line-height: 1.7; white-space: pre-wrap; }
+@media (max-width: 720px) { .wn-kit-grid { grid-template-columns: 1fr; } .wn-trope-grid { grid-template-columns: 1fr; } }
 `;
 
     function safeStyles(ctx) {
