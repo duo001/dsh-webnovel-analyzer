@@ -12,7 +12,7 @@ window.__ModuleLoader__.load({
     const PANEL_ID = 'webnovel-analyzer';
     const API = '/webnovel';
     // 构建标记：白屏/缓存排查用，硬刷新后标题处应显示该标记
-    const BUILD_TAG = 'v0.1.5';
+    const BUILD_TAG = 'v0.1.6';
 
     // 生成方向词表（与 trope-prompts.js 保持一致）
     const ARC_VALUES = ['世情四段', '渣虐悔追', '受辱反击打脸', '欺觉反爽', '设虐爽胜', '悬疑六段', '纯虐四段', '治愈四段'];
@@ -315,6 +315,8 @@ window.__ModuleLoader__.load({
 
     function TropeDetailModal(props) {
       const { trope, onClose, onDelete, onRegenerate, dimensionMap } = props;
+      const [copied, setCopied] = useState(false);
+      const [exported, setExported] = useState(false);
       if (!trope) return null;
       const fk = trope.fourKit || {};
       const rich = trope.rich;
@@ -324,6 +326,15 @@ window.__ModuleLoader__.load({
         ['🔀 反差', fk.contrast], ['⚔️ 动作部署', fk.move]
       ].filter(([, v]) => v);
       const playbook = Array.isArray(trope.playbook) ? trope.playbook : [];
+
+      async function copyAll() {
+        const ok = await copyText(tropeToMarkdown(trope, dimensionMap));
+        if (ok) { setCopied(true); setTimeout(() => setCopied(false), 1800); }
+      }
+      function exportAll() {
+        const ok = downloadTextFile('热梗卡-' + safeFileName(trope.title || '未命名') + '.md', tropeToMarkdown(trope, dimensionMap));
+        if (ok) { setExported(true); setTimeout(() => setExported(false), 1800); }
+      }
 
       return h('div', { className: 'wn-modal-mask', onClick: onClose },
         h('div', { className: 'wn-modal wn-trope-modal', onClick: (e) => e.stopPropagation() },
@@ -368,12 +379,20 @@ window.__ModuleLoader__.load({
                     h('p', null, p.play));
                 }))),
             !rich && h('p', { className: 'wn-modal-tip' }, '该条目为精简卡片，暂无四件套/情绪引擎等深度字段；可在上方筛选「仅看富卡片」。'),
-            isGenerated && h('div', { className: 'wn-modal-actions' },
+            h('div', { className: 'wn-modal-actions' },
               h('button', {
                 type: 'button', className: 'wn-btn wn-btn-primary wn-btn-sm',
+                onClick: copyAll
+              }, copied ? '✓ 已复制全文' : '📋 全文复制'),
+              h('button', {
+                type: 'button', className: 'wn-btn wn-btn-ghost wn-btn-sm',
+                onClick: exportAll
+              }, exported ? '✓ 已导出' : '⬇️ 导出 Markdown'),
+              isGenerated && h('button', {
+                type: 'button', className: 'wn-btn wn-btn-ghost wn-btn-sm',
                 onClick: () => { onClose(); onRegenerate && onRegenerate(trope); }
               }, '🔁 带方向重新生成'),
-              h('button', {
+              isGenerated && h('button', {
                 type: 'button', className: 'wn-btn wn-btn-ghost wn-btn-sm',
                 onClick: () => onDelete && onDelete(trope.id)
               }, '🗑 删除此卡')))));
@@ -1014,6 +1033,93 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // 文件名安全化：去掉各系统非法字符，限制长度
+    function safeFileName(name) {
+      const cleaned = String(name == null ? '' : name)
+        .replace(/[\\/:*?"<>|\r\n\t]/g, '_')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 80);
+      return cleaned || 'export';
+    }
+
+    // 触发浏览器下载一个文本文件（纯前端 Blob，不经过 Host）
+    function downloadTextFile(filename, text) {
+      try {
+        const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = safeFileName(filename);
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 3000);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    // 热梗卡 → 完整 Markdown（导入的精简卡与 AI 生成卡都适用）
+    function tropeToMarkdown(trope, dimensionMap) {
+      const fk = trope.fourKit || {};
+      const L = [];
+      L.push('# ' + (trope.title || '未命名热梗'));
+      const tags = [trope.arc, ...(trope.mechanisms || []), ...(trope.genres || []), ...(trope.settings || [])].filter(Boolean);
+      if (tags.length) { L.push(''); L.push('> ' + tags.join(' / ')); }
+      const meta = [];
+      if (trope.origin === 'generated') meta.push('来源：AI 生成');
+      if (trope.createdAt) meta.push('时间：' + trope.createdAt);
+      if (meta.length) { L.push(''); L.push('_' + meta.join(' · ') + '_'); }
+      L.push('', '## 一句话梗概', trope.oneLine || '—');
+      L.push('', '## 卖点', trope.sellingPoint || '—');
+      const kit = [
+        ['🎯 动机', fk.motive], ['🚧 底线', fk.bottomline],
+        ['🔀 反差', fk.contrast], ['⚔️ 动作部署', fk.move]
+      ].filter(([, v]) => v);
+      if (kit.length) {
+        L.push('', '## 四件套');
+        for (const [k, v] of kit) L.push(`- **${k}**：${v}`);
+      }
+      if (trope.emotionEngine) L.push('', '## 🎢 情绪引擎', trope.emotionEngine);
+      if (trope.painPoints && trope.painPoints.length) L.push('', '## 💔 虐点', ...trope.painPoints.map((p) => `- ${p}`));
+      if (trope.highlights && trope.highlights.length) L.push('', '## ✨ 高光名场面', ...trope.highlights.map((p) => `- ${p}`));
+      const playbook = Array.isArray(trope.playbook) ? trope.playbook : [];
+      if (playbook.length) {
+        L.push('', '## 📐 各维度可用网文写法');
+        for (const p of playbook) {
+          const m = (dimensionMap || {})[p.dimensionId];
+          const name = p.dimensionName || m?.name || p.dimensionId;
+          L.push('', `### ${m?.emoji ? m.emoji + ' ' : ''}${name}`, '', p.play);
+        }
+      }
+      return L.join('\n') + '\n';
+    }
+
+    // 一次拆文运行 → 完整 Markdown（含各维度报告）
+    function runToMarkdown(run, fmtTime) {
+      const items = Array.isArray(run.items) ? run.items : [];
+      const okCount = items.filter((i) => i.status === 'done').length;
+      const L = [];
+      L.push('# 拆文报告 · ' + (run.fileName || '未命名稿件'));
+      L.push('');
+      L.push('- 时间：' + (fmtTime ? fmtTime(run.createdAt) : run.createdAt || '-'));
+      L.push('- 字数：' + (run.charCount || 0));
+      L.push('- 模型：' + (run.model || '-'));
+      L.push(`- 维度：${items.length} 个（成功 ${okCount} · 失败 ${items.length - okCount}）`);
+      if (run.textPreview) {
+        L.push('');
+        L.push('> 原文预览：' + String(run.textPreview).replace(/\s+/g, ' ') + ((run.charCount || 0) > 120 ? '…' : ''));
+      }
+      for (const it of items) {
+        L.push('', `## ${it.dimensionName || it.dimensionId}${it.status === 'done' ? '' : '（失败）'}`);
+        if (it.status === 'done') L.push('', it.markdown || '');
+        else L.push('', '> 分析失败：' + (it.error || '未知错误'));
+      }
+      return L.join('\n') + '\n';
+    }
+
     function GeneratedCard(props) {
       const { card, dimensionMap } = props;
       const [copied, setCopied] = useState(false);
@@ -1345,6 +1451,8 @@ window.__ModuleLoader__.load({
     function HistoryDetailModal(props) {
       const { run, onClose, onDelete, fmtTime } = props;
       const dimensionMapRef = useRef({});
+      const [copied, setCopied] = useState(false);
+      const [exported, setExported] = useState(false);
       useEffect(() => {
         api('/dimensions').then((data) => {
           const map = {};
@@ -1352,6 +1460,18 @@ window.__ModuleLoader__.load({
           dimensionMapRef.current = map;
         }).catch(() => {});
       }, []);
+
+      async function copyAll() {
+        const ok = await copyText(runToMarkdown(run, fmtTime));
+        if (ok) { setCopied(true); setTimeout(() => setCopied(false), 1800); }
+      }
+      function exportAll() {
+        const stamp = String(run.createdAt || '').slice(0, 10);
+        const base = safeFileName((run.fileName || '未命名稿件').replace(/\.[^.]+$/, ''));
+        const ok = downloadTextFile(`拆文报告-${base}${stamp ? '-' + stamp : ''}.md`, runToMarkdown(run, fmtTime));
+        if (ok) { setExported(true); setTimeout(() => setExported(false), 1800); }
+      }
+
       return h('div', { className: 'wn-modal-mask', onClick: onClose },
         h('div', { className: 'wn-modal wn-history-modal', onClick: (e) => e.stopPropagation() },
           h('div', { className: 'wn-modal-head' },
@@ -1376,6 +1496,14 @@ window.__ModuleLoader__.load({
                   : h('p', { className: 'wn-error-text' }, it.error || '未知错误'));
             })),
           h('div', { className: 'wn-modal-actions' },
+            h('button', {
+              type: 'button', className: 'wn-btn wn-btn-primary wn-btn-sm',
+              onClick: copyAll
+            }, copied ? '✓ 已复制全文' : '📋 全文复制'),
+            h('button', {
+              type: 'button', className: 'wn-btn wn-btn-ghost wn-btn-sm',
+              onClick: exportAll
+            }, exported ? '✓ 已导出' : '⬇️ 导出 Markdown'),
             h('button', {
               type: 'button', className: 'wn-btn wn-btn-ghost wn-btn-sm',
               onClick: () => onDelete(run.id)
@@ -1589,7 +1717,7 @@ window.__ModuleLoader__.load({
 .wn-origin-row { margin-top: 10px; }
 .wn-upload-note { font-size: 12px; color: var(--dsw-alias-label-secondary); line-height: 1.7; margin: 10px 0 0; }
 .wn-import-zone-inner { cursor: pointer; }
-.wn-modal-actions { display: flex; gap: 10px; justify-content: flex-end; padding-top: 12px; border-top: 1px solid var(--dsw-alias-border-l1); margin-top: 14px; }
+.wn-modal-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; padding-top: 12px; border-top: 1px solid var(--dsw-alias-border-l1); margin-top: 14px; }
 .wn-direction { border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px; padding: 14px 16px; margin: 12px 0; background: var(--dsw-alias-bg-layer-1); }
 .wn-direction-title { font-size: 13px; font-weight: 700; color: var(--dsw-alias-label-primary); margin-bottom: 10px; }
 .wn-direction-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 10px; }
