@@ -12,7 +12,7 @@ window.__ModuleLoader__.load({
     const PANEL_ID = 'webnovel-analyzer';
     const API = '/webnovel';
     // 构建标记：白屏/缓存排查用，硬刷新后标题处应显示该标记
-    const BUILD_TAG = 'v0.1.6';
+    const BUILD_TAG = 'v0.1.7';
 
     // 生成方向词表（与 trope-prompts.js 保持一致）
     const ARC_VALUES = ['世情四段', '渣虐悔追', '受辱反击打脸', '欺觉反爽', '设虐爽胜', '悬疑六段', '纯虐四段', '治愈四段'];
@@ -378,7 +378,8 @@ window.__ModuleLoader__.load({
                       h('strong', null, meta?.name || p.dimensionId)),
                     h('p', null, p.play));
                 }))),
-            !rich && h('p', { className: 'wn-modal-tip' }, '该条目为精简卡片，暂无四件套/情绪引擎等深度字段；可在上方筛选「仅看富卡片」。'),
+            !rich && h('p', { className: 'wn-modal-tip' }, '该条目为精简卡片，暂无四件套/情绪引擎等深度字段；可在上方筛选「仅看富卡片」。')),
+          h('div', { className: 'wn-modal-foot' },
             h('div', { className: 'wn-modal-actions' },
               h('button', {
                 type: 'button', className: 'wn-btn wn-btn-primary wn-btn-sm',
@@ -1495,7 +1496,8 @@ window.__ModuleLoader__.load({
                   ? h('div', { className: 'wn-md', dangerouslySetInnerHTML: { __html: markdownToHtml(it.markdown) } })
                   : h('p', { className: 'wn-error-text' }, it.error || '未知错误'));
             })),
-          h('div', { className: 'wn-modal-actions' },
+          h('div', { className: 'wn-modal-foot' },
+            h('div', { className: 'wn-modal-actions' },
             h('button', {
               type: 'button', className: 'wn-btn wn-btn-primary wn-btn-sm',
               onClick: copyAll
@@ -1507,7 +1509,7 @@ window.__ModuleLoader__.load({
             h('button', {
               type: 'button', className: 'wn-btn wn-btn-ghost wn-btn-sm',
               onClick: () => onDelete(run.id)
-            }, '🗑 删除此记录'))));
+            }, '🗑 删除此记录')))));
     }
 
     // ---------------- 主面板：Tab 外壳 ----------------
@@ -1633,10 +1635,10 @@ window.__ModuleLoader__.load({
 .wn-sk-line.w1 { width: 40%; } .wn-sk-line.w2 { width: 65%; } .wn-sk-line.w3 { width: 90%; }
 @keyframes wn-pulse { 50% { opacity: .45; } }
 .wn-modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,.42); display:flex; align-items:center; justify-content:center; z-index: 1000; }
-.wn-modal { width: min(640px, 92vw); max-height: 86vh; overflow:auto; background: var(--dsw-alias-bg-base); border: 1px solid var(--dsw-alias-border-l1); border-radius: 14px; box-shadow: 0 12px 40px rgba(0,0,0,.28); }
-.wn-modal-head { display:flex; align-items:center; justify-content:space-between; padding: 16px 20px; border-bottom: 1px solid var(--dsw-alias-border-l1); position: sticky; top: 0; background: var(--dsw-alias-bg-base); }
+.wn-modal { width: min(640px, 92vw); max-height: 86vh; display:flex; flex-direction:column; overflow:hidden; background: var(--dsw-alias-bg-base); border: 1px solid var(--dsw-alias-border-l1); border-radius: 14px; box-shadow: 0 12px 40px rgba(0,0,0,.28); }
+.wn-modal-head { flex: 0 0 auto; display:flex; align-items:center; justify-content:space-between; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-base); }
 .wn-modal-x { border: none; background: none; font-size: 22px; cursor: pointer; color: var(--dsw-alias-label-secondary); line-height: 1; }
-.wn-modal-body { padding: 16px 20px; display:flex; flex-direction: column; gap: 14px; }
+.wn-modal-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 16px 20px; display:flex; flex-direction: column; gap: 14px; }
 .wn-modal-tip { font-size: 12px; color: var(--dsw-alias-label-secondary); margin: 0; background: var(--dsw-alias-bg-layer-1); padding: 8px 10px; border-radius: 8px; }
 .wn-provider-tabs { display:flex; flex-wrap: wrap; gap: 6px; }
 .wn-provider-tab { border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); border-radius: 8px; padding: 6px 10px; font-size: 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
@@ -1647,7 +1649,7 @@ window.__ModuleLoader__.load({
 .wn-field input:focus { border-color: var(--dsw-alias-brand-primary); }
 .wn-key-row { display:flex; gap: 8px; }
 .wn-key-row input { flex: 1; }
-.wn-modal-foot { padding: 14px 20px; border-top: 1px solid var(--dsw-alias-border-l1); display:flex; justify-content: flex-end; gap: 10px; align-items: center; position: sticky; bottom: 0; background: var(--dsw-alias-bg-base); }
+.wn-modal-foot { flex: 0 0 auto; padding: 14px 20px; border-top: 1px solid var(--dsw-alias-border-l1); display:flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; align-items: center; background: var(--dsw-alias-bg-base); }
 .wn-modal-msg { font-size: 12px; margin-right: auto; }
 .wn-modal-msg.ok { color: #3da664; }
 .wn-modal-msg.err { color: #d4694f; }
@@ -1717,7 +1719,7 @@ window.__ModuleLoader__.load({
 .wn-origin-row { margin-top: 10px; }
 .wn-upload-note { font-size: 12px; color: var(--dsw-alias-label-secondary); line-height: 1.7; margin: 10px 0 0; }
 .wn-import-zone-inner { cursor: pointer; }
-.wn-modal-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; padding-top: 12px; border-top: 1px solid var(--dsw-alias-border-l1); margin-top: 14px; }
+.wn-modal-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }
 .wn-direction { border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px; padding: 14px 16px; margin: 12px 0; background: var(--dsw-alias-bg-layer-1); }
 .wn-direction-title { font-size: 13px; font-weight: 700; color: var(--dsw-alias-label-primary); margin-bottom: 10px; }
 .wn-direction-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 10px; }

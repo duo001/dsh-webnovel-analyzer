@@ -1,7 +1,7 @@
 {
   "name": "@local/webnovel-analyzer",
   "private": true,
-  "version": "0.1.6",
+  "version": "0.1.7",
   "type": "module",
   "description": "短篇网文拆文分析工具：22 维并发 LLM 分析、本地热梗库检索（数据自行导入）、AI 热梗卡片生成与拆文历史。",
   "exports": {
