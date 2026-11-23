@@ -5,8 +5,9 @@ import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { DIMENSIONS, DIMENSION_MAP, PROVIDERS, PROVIDER_MAP, LIMITS } from './dimensions.js';
-import { loadTropes, queryTropes, getTropeById, facetVocabulary } from './trope-store.js';
+import { queryTropes, getTropeById, facetVocabulary, tropeStatus, importTropes, exportTropesRaw, saveGeneratedCard, deleteGeneratedCard } from './trope-store.js';
 import { TROPE_CARD_SYSTEM, TROPE_CARD_USER, parseTropeCard } from './trope-prompts.js';
+import { listRuns, getRun, saveRun, deleteRun, clearRuns } from './history-store.js';
 
 export const inject = ['webServer', 'credentials'];
 
@@ -44,7 +45,7 @@ function readJsonBody(req, limitBytes = 200 * 1024) {
     req.on('data', (chunk) => {
       size += chunk.length;
       if (size > limitBytes) {
-        reject(Object.assign(new Error('请求体过大（单次上限 200KB）'), { status: 413, code: 'payload-too-large' }));
+        reject(Object.assign(new Error(`请求体过大（单次上限 ${Math.round(limitBytes / 1024)}KB）`), { status: 413, code: 'payload-too-large' }));
         req.destroy();
         return;
       }
@@ -399,46 +400,142 @@ export function apply(ctx) {
         return;
       }
 
-      // ---------- 热梗库 ----------
-      // GET /tropes/facets —— 四个筛选分面（弧线/机制/题材/设定，带计数）
-      if (method === 'GET' && path === '/tropes/facets') {
-        const store = await loadTropes();
-        sendJson(res, 200, { ok: true, facets: facetVocabulary(), source: store.source, syncedAt: store.syncedAt, total: store.total });
+      // ---------- 热梗库（数据不随包分发，需用户本地导入；AI 生成卡与导入库合并） ----------
+      // GET /tropes/status —— 导入/生成卡状态（空态页据此显示导入入口）
+      if (method === 'GET' && path === '/tropes/status') {
+        sendJson(res, 200, { ok: true, status: await tropeStatus() });
         return;
       }
 
-      // GET /tropes/:id —— 单条热梗完整卡片（富卡片含四件套/情绪引擎/虐点/高光）
-      const tropeDetailMatch = path.match(/^\/tropes\/([^/]+)$/);
-      if (method === 'GET' && tropeDetailMatch && path !== '/tropes') {
-        await loadTropes();
-        const trope = getTropeById(decodeURIComponent(tropeDetailMatch[1]));
-        if (!trope) {
-          sendError(res, 404, 'trope-not-found', '未找到该热梗卡片。');
+      // POST /tropes/import —— 导入 tropes.json（body 含原始 JSON 文本，上限 4MB）
+      if (method === 'POST' && path === '/tropes/import') {
+        const body = await readJsonBody(req, 4 * 1024 * 1024);
+        const jsonText = typeof body.json === 'string' ? body.json : '';
+        if (!jsonText.trim()) {
+          sendError(res, 400, 'empty-import', '导入内容为空，请重新选择 tropes.json 文件。');
           return;
         }
-        sendJson(res, 200, { ok: true, trope });
+        try {
+          const result = await importTropes(jsonText);
+          sendJson(res, 200, { ok: true, status: { imported: true, ...result } });
+        } catch (err) {
+          sendError(res, 400, err.code || 'bad-tropes-file', err.message || '热梗数据导入失败。');
+        }
         return;
       }
 
-      // GET /tropes?arc=&mechanism=&genre=&setting=&q=&richOnly=&page=&pageSize=
+      // GET /tropes/export —— 下载当前本地导入的热梗数据（未导入时 404）
+      if (method === 'GET' && path === '/tropes/export') {
+        try {
+          const { json } = await exportTropesRaw();
+          res.writeHead(200, {
+            'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'no-store',
+            'content-disposition': 'attachment; filename="tropes.json"'
+          });
+          res.end(json);
+        } catch (err) {
+          if (err?.code === 'tropes-not-imported') {
+            sendError(res, 404, 'tropes-not-imported', '尚未导入热梗数据，无可导出内容。');
+            return;
+          }
+          throw err;
+        }
+        return;
+      }
+
+      // GET /tropes/facets —— 四个筛选分面（弧线/机制/题材/设定，合并导入库与生成卡后动态计数）
+      if (method === 'GET' && path === '/tropes/facets') {
+        try {
+          sendJson(res, 200, { ok: true, facets: await facetVocabulary() });
+        } catch (err) {
+          if (err?.code === 'tropes-not-imported') {
+            sendError(res, 404, 'tropes-not-imported', '热梗库为空，请先导入数据或生成热梗卡片。');
+            return;
+          }
+          throw err;
+        }
+        return;
+      }
+
+      // POST /tropes/generated —— 保存一张 AI 生成卡到本地库
+      if (method === 'POST' && path === '/tropes/generated') {
+        const body = await readJsonBody(req);
+        if (!body.card || typeof body.card !== 'object') {
+          sendError(res, 400, 'bad-card', '缺少要保存的卡片对象。');
+          return;
+        }
+        let card;
+        try {
+          card = parseTropeCard(JSON.stringify(body.card));
+        } catch (err) {
+          sendError(res, 400, 'bad-card', '卡片结构异常，无法保存：' + err.message);
+          return;
+        }
+        const record = await saveGeneratedCard(card);
+        sendJson(res, 200, { ok: true, trope: { ...record, rich: true } });
+        return;
+      }
+
+      // DELETE /tropes/generated/:id —— 删除一张本地 AI 生成卡（导入库条目不可删）
+      const deleteGeneratedMatch = path.match(/^\/tropes\/generated\/([^/]+)$/);
+      if (method === 'DELETE' && deleteGeneratedMatch) {
+        const ok = await deleteGeneratedCard(decodeURIComponent(deleteGeneratedMatch[1]));
+        if (!ok) {
+          sendError(res, 404, 'trope-not-found', '未找到该 AI 生成卡（可能已删除，或它属于导入库）。');
+          return;
+        }
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+
+      // GET /tropes/:id —— 单条热梗完整卡片（富卡片含四件套/情绪引擎/虐点/高光；导入库与生成卡统一检索）
+      const tropeDetailMatch = path.match(/^\/tropes\/([^/]+)$/);
+      if (method === 'GET' && tropeDetailMatch && path !== '/tropes') {
+        try {
+          const trope = await getTropeById(decodeURIComponent(tropeDetailMatch[1]));
+          if (!trope) {
+            sendError(res, 404, 'trope-not-found', '未找到该热梗卡片。');
+            return;
+          }
+          sendJson(res, 200, { ok: true, trope });
+        } catch (err) {
+          if (err?.code === 'tropes-not-imported') {
+            sendError(res, 404, 'tropes-not-imported', '热梗库为空，请先导入数据或生成热梗卡片。');
+            return;
+          }
+          throw err;
+        }
+        return;
+      }
+
+      // GET /tropes?arc=&mechanism=&genre=&setting=&q=&richOnly=&origin=&page=&pageSize=
       if (method === 'GET' && path === '/tropes') {
-        await loadTropes();
-        const result = queryTropes({
-          arc: url.searchParams.get('arc') || '',
-          mechanism: url.searchParams.get('mechanism') || '',
-          genre: url.searchParams.get('genre') || '',
-          setting: url.searchParams.get('setting') || '',
-          q: url.searchParams.get('q') || '',
-          richOnly: url.searchParams.get('richOnly') === '1'
-        }, {
-          page: Number(url.searchParams.get('page')) || 1,
-          pageSize: Number(url.searchParams.get('pageSize')) || 24
-        });
-        sendJson(res, 200, { ok: true, ...result });
+        try {
+          const result = await queryTropes({
+            arc: url.searchParams.get('arc') || '',
+            mechanism: url.searchParams.get('mechanism') || '',
+            genre: url.searchParams.get('genre') || '',
+            setting: url.searchParams.get('setting') || '',
+            q: url.searchParams.get('q') || '',
+            richOnly: url.searchParams.get('richOnly') === '1',
+            origin: url.searchParams.get('origin') || ''
+          }, {
+            page: Number(url.searchParams.get('page')) || 1,
+            pageSize: Number(url.searchParams.get('pageSize')) || 24
+          });
+          sendJson(res, 200, { ok: true, ...result });
+        } catch (err) {
+          if (err?.code === 'tropes-not-imported') {
+            sendError(res, 404, 'tropes-not-imported', '热梗库为空，请先导入数据或生成热梗卡片。');
+            return;
+          }
+          throw err;
+        }
         return;
       }
 
-      // POST /trope-card —— AI 从素材生成热梗卡片（同构 schema + 各维度写法 playbook）
+      // POST /trope-card —— AI 从素材生成热梗卡片（同构 schema + 各维度写法 playbook；可带生成方向）
       if (method === 'POST' && path === '/trope-card') {
         const body = await readJsonBody(req);
         const text = typeof body.text === 'string' ? body.text : '';
@@ -451,6 +548,11 @@ export function apply(ctx) {
           sendError(res, 413, 'text-too-long', `素材 ${charCount} 字，超过单篇 ${LIMITS.maxChars} 字上限。`, { charCount });
           return;
         }
+        const direction = {
+          arc: typeof body.direction?.arc === 'string' ? body.direction.arc.trim().slice(0, 40) : '',
+          mechanism: typeof body.direction?.mechanism === 'string' ? body.direction.mechanism.trim().slice(0, 40) : '',
+          note: typeof body.direction?.note === 'string' ? body.direction.note.trim() : ''
+        };
 
         const config = await loadConfig();
         const resolved = await resolveProviderAndKey(credentials, config, body.providerId);
@@ -467,7 +569,7 @@ export function apply(ctx) {
           timeoutMs: config.timeoutMs,
           messages: [
             { role: 'system', content: TROPE_CARD_SYSTEM },
-            { role: 'user', content: TROPE_CARD_USER(text) }
+            { role: 'user', content: TROPE_CARD_USER(text, direction) }
           ]
         });
 
@@ -478,6 +580,12 @@ export function apply(ctx) {
           sendError(res, 502, 'card-parse-failed', '热梗卡片生成失败：' + err.message + '（可换用更强的模型重试）');
           return;
         }
+        // body.save === true 时直接入库，返回带 id 的记录
+        let savedId = null;
+        if (body.save === true) {
+          const record = await saveGeneratedCard(card);
+          savedId = record.id;
+        }
         sendJson(res, 200, {
           ok: true,
           providerId: resolved.providerId,
@@ -485,8 +593,62 @@ export function apply(ctx) {
           elapsedMs: Date.now() - startedAt,
           charCount,
           card,
+          savedId,
           usage: result.usage
         });
+        return;
+      }
+
+      // ---------- 拆文历史（只存报告与原文预览，不存全文） ----------
+      // GET /history —— 历史运行列表（元信息，不含 markdown）
+      if (method === 'GET' && path === '/history') {
+        sendJson(res, 200, {
+          ok: true,
+          ...await listRuns({
+            page: Number(url.searchParams.get('page')) || 1,
+            pageSize: Number(url.searchParams.get('pageSize')) || 20
+          })
+        });
+        return;
+      }
+
+      // GET /history/:id —— 单次运行完整报告
+      const historyMatch = path.match(/^\/history\/([^/]+)$/);
+      if (method === 'GET' && historyMatch) {
+        const run = await getRun(decodeURIComponent(historyMatch[1]));
+        if (!run) {
+          sendError(res, 404, 'run-not-found', '未找到该历史记录（可能已被删除）。');
+          return;
+        }
+        sendJson(res, 200, { ok: true, run });
+        return;
+      }
+
+      // POST /history —— 一次批量拆文结束后由 Client 提交完整 run
+      if (method === 'POST' && path === '/history') {
+        const body = await readJsonBody(req);
+        if (!body || !Array.isArray(body.items) || body.items.length === 0) {
+          sendError(res, 400, 'bad-history', '历史记录缺少分析结果 items。');
+          return;
+        }
+        const run = await saveRun(body);
+        sendJson(res, 200, { ok: true, id: run.id, run });
+        return;
+      }
+
+      // DELETE /history/:id —— 删除单条；DELETE /history 清空全部
+      if (method === 'DELETE' && path === '/history') {
+        await clearRuns();
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+      if (method === 'DELETE' && historyMatch) {
+        const ok = await deleteRun(decodeURIComponent(historyMatch[1]));
+        if (!ok) {
+          sendError(res, 404, 'run-not-found', '未找到该历史记录。');
+          return;
+        }
+        sendJson(res, 200, { ok: true });
         return;
       }
 

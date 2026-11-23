@@ -12,7 +12,13 @@ window.__ModuleLoader__.load({
     const PANEL_ID = 'webnovel-analyzer';
     const API = '/webnovel';
     // 构建标记：白屏/缓存排查用，硬刷新后标题处应显示该标记
-    const BUILD_TAG = 'v0.1.2';
+    const BUILD_TAG = 'v0.1.3';
+
+    // 生成方向词表（与 trope-prompts.js 保持一致）
+    const ARC_VALUES = ['世情四段', '渣虐悔追', '受辱反击打脸', '欺觉反爽', '设虐爽胜', '悬疑六段', '纯虐四段', '治愈四段'];
+    const MECHANISM_VALUES = ['信息差碾压', '静默退场', '藏锋亮剑', '死后清算', '恶意顺从', '因果反噬', '情感兑现', '清醒嘴替', '绝境黑化', '示弱借势', '自立赎身', '纯虐沉浸'];
+    // 跨页签通信：热梗库详情「带方向重新生成」→ Panel 切换到生成器并预填方向
+    const regenBus = { listeners: [], emit(payload) { this.listeners.slice().forEach((fn) => fn(payload)); }, on(fn) { this.listeners.push(fn); return () => { this.listeners = this.listeners.filter((f) => f !== fn); }; } };
 
     // ---------------- 基础工具 ----------------
     function api(path, options) {
@@ -308,19 +314,23 @@ window.__ModuleLoader__.load({
     }
 
     function TropeDetailModal(props) {
-      const { trope, onClose } = props;
+      const { trope, onClose, onDelete, onRegenerate, dimensionMap } = props;
       if (!trope) return null;
       const fk = trope.fourKit || {};
       const rich = trope.rich;
+      const isGenerated = trope.origin === 'generated';
       const kit = [
         ['🎯 动机', fk.motive], ['🚧 底线', fk.bottomline],
         ['🔀 反差', fk.contrast], ['⚔️ 动作部署', fk.move]
       ].filter(([, v]) => v);
+      const playbook = Array.isArray(trope.playbook) ? trope.playbook : [];
 
       return h('div', { className: 'wn-modal-mask', onClick: onClose },
         h('div', { className: 'wn-modal wn-trope-modal', onClick: (e) => e.stopPropagation() },
           h('div', { className: 'wn-modal-head' },
-            h('strong', null, trope.title),
+            h('strong', null,
+              isGenerated && h('span', { className: 'wn-ai-badge', style: { marginRight: 8 } }, 'AI'),
+              trope.title),
             h('button', { className: 'wn-modal-x', onClick: onClose, 'aria-label': '关闭' }, '×')),
           h('div', { className: 'wn-modal-body' },
             h('div', { className: 'wn-trope-tags' },
@@ -346,13 +356,33 @@ window.__ModuleLoader__.load({
             rich && trope.highlights && trope.highlights.length > 0 && h('div', { className: 'wn-kv' },
               h('span', { className: 'wn-kv-k' }, '✨ 高光名场面'),
               h('ul', { className: 'wn-bullet' }, trope.highlights.map((p, i) => h('li', { key: i }, p)))),
-            !rich && h('p', { className: 'wn-modal-tip' }, '该条目为精简卡片，暂无四件套/情绪引擎等深度字段；可在上方筛选「仅看富卡片」。'))));
+            playbook.length > 0 && h('div', { className: 'wn-kv' },
+              h('span', { className: 'wn-kv-k' }, '📐 各维度可用网文写法'),
+              h('div', { className: 'wn-playbook' },
+                playbook.map((p, i) => {
+                  const meta = (dimensionMap || {})[p.dimensionId];
+                  return h('div', { key: i, className: 'wn-play-cell' },
+                    h('div', { className: 'wn-play-dim' },
+                      h('span', { className: 'wn-dim-emoji' }, meta?.emoji || '📝'),
+                      h('strong', null, meta?.name || p.dimensionId)),
+                    h('p', null, p.play));
+                }))),
+            !rich && h('p', { className: 'wn-modal-tip' }, '该条目为精简卡片，暂无四件套/情绪引擎等深度字段；可在上方筛选「仅看富卡片」。'),
+            isGenerated && h('div', { className: 'wn-modal-actions' },
+              h('button', {
+                type: 'button', className: 'wn-btn wn-btn-primary wn-btn-sm',
+                onClick: () => { onClose(); onRegenerate && onRegenerate(trope); }
+              }, '🔁 带方向重新生成'),
+              h('button', {
+                type: 'button', className: 'wn-btn wn-btn-ghost wn-btn-sm',
+                onClick: () => onDelete && onDelete(trope.id)
+              }, '🗑 删除此卡')))));
     }
 
     function TropeLibrary() {
       const [facets, setFacets] = useState(null);
-      const [meta, setMeta] = useState({ total: 0, source: '' });
-      const [filters, setFilters] = useState({ arc: '', mechanism: '', genre: '', setting: '', q: '', richOnly: false });
+      const [status, setStatus] = useState(null); // { imported, total, richCount, source, syncedAt, generatedCount }
+      const [filters, setFilters] = useState({ arc: '', mechanism: '', genre: '', setting: '', q: '', richOnly: false, origin: '' });
       const [page, setPage] = useState(1);
       const [items, setItems] = useState([]);
       const [total, setTotal] = useState(0);
@@ -361,18 +391,56 @@ window.__ModuleLoader__.load({
       const [error, setError] = useState(null);
       const [detail, setDetail] = useState(null);
       const [detailLoading, setDetailLoading] = useState(false);
+      const [importing, setImporting] = useState(false);
+      const [importMsg, setImportMsg] = useState(null); // { kind:'ok'|'err', text }
+      const [dragOver, setDragOver] = useState(false);
       const searchRef = useRef(null);
+      const importRef = useRef(null);
+      const [dimensionMap, setDimensionMap] = useState({});
+      useEffect(() => {
+        api('/dimensions').then((data) => {
+          const map = {};
+          for (const d of data.dimensions) map[d.id] = d;
+          setDimensionMap(map);
+        }).catch(() => {});
+      }, []);
+
+      function regenerateFromTrope(trope) {
+        const noteParts = [];
+        if (trope.oneLine) noteParts.push('参考原卡梗概：' + trope.oneLine);
+        if (trope.sellingPoint) noteParts.push('参考原卡卖点：' + trope.sellingPoint);
+        if (Array.isArray(trope.highlights)) noteParts.push('希望保留的高光：' + trope.highlights.join('；'));
+        regenBus.emit({
+          direction: {
+            arc: trope.arc || '',
+            mechanism: (trope.mechanisms || [])[0] || '',
+            note: noteParts.join('\n').slice(0, 1200)
+          },
+          seedTitle: trope.title || ''
+        });
+      }
+
+      async function loadStatus() {
+        try {
+          const data = await api('/tropes/status');
+          setStatus(data.status);
+          return data.status;
+        } catch (err) {
+          setError('读取热梗库状态失败：' + err.message);
+          return null;
+        }
+      }
 
       async function loadFacets() {
         try {
           const data = await api('/tropes/facets');
           setFacets(data.facets);
-          setMeta({ total: data.total, source: data.source });
         } catch (err) {
+          if (err.code === 'tropes-not-imported') { setFacets(null); return; }
           setError('加载热梗分面失败：' + err.message);
         }
       }
-      useEffect(() => { loadFacets(); }, []);
+      useEffect(() => { loadStatus(); loadFacets(); }, []);
 
       async function loadList(nextPage, reset) {
         setLoading(true); setError(null);
@@ -389,12 +457,19 @@ window.__ModuleLoader__.load({
           setHasMore(data.hasMore);
           setPage(data.page);
         } catch (err) {
+          if (err.code === 'tropes-not-imported') { setItems([]); setTotal(0); setHasMore(false); return; }
           setError('加载热梗列表失败：' + err.message);
         } finally {
           setLoading(false);
         }
       }
-      useEffect(() => { loadList(1, true); /* eslint-disable-line */ }, [filters]);
+      // 库里只要有内容（导入库或 AI 生成卡）就加载列表
+      useEffect(() => {
+        if (!status) return;
+        if (status.imported || status.generatedCount > 0) loadList(1, true);
+        else { setItems([]); setTotal(0); setFacets(null); }
+        /* eslint-disable-line */
+      }, [filters, status]);
 
       function pickFacet(key, value) {
         setFilters((prev) => ({ ...prev, [key]: prev[key] === value ? '' : value }));
@@ -405,7 +480,7 @@ window.__ModuleLoader__.load({
       }
       function resetFilters() {
         if (searchRef.current) searchRef.current.value = '';
-        setFilters({ arc: '', mechanism: '', genre: '', setting: '', q: '', richOnly: false });
+        setFilters({ arc: '', mechanism: '', genre: '', setting: '', q: '', richOnly: false, origin: '' });
       }
       async function openDetail(id) {
         setDetailLoading(true); setDetail(null);
@@ -419,6 +494,83 @@ window.__ModuleLoader__.load({
         }
       }
 
+      async function deleteGenerated(id) {
+        if (!window.confirm('确定删除这张 AI 生成卡？删除后不可恢复（导入库条目不可删）。')) return;
+        try {
+          await api('/tropes/generated/' + encodeURIComponent(id), { method: 'DELETE' });
+          setDetail(null);
+          setImportMsg({ kind: 'ok', text: '已删除该 AI 生成卡。' });
+          await loadStatus();
+          await loadFacets();
+          await loadList(1, true);
+        } catch (err) {
+          setError('删除失败：' + err.message);
+        }
+      }
+
+      async function handleImportFile(file) {
+        if (!file) return;
+        if (!/\.json$/i.test(file.name)) {
+          setImportMsg({ kind: 'err', text: '请选择 tropes.json（.json 格式）文件。' });
+          return;
+        }
+        setImporting(true); setImportMsg(null);
+        try {
+          const json = await file.text();
+          const data = await api('/tropes/import', { method: 'POST', body: JSON.stringify({ json }) });
+          setImportMsg({ kind: 'ok', text: `导入成功：共 ${data.status.total} 条，其中富卡片 ${data.status.richCount} 条。` });
+          setError(null);
+          await loadStatus();
+          await loadFacets();
+          setFilters({ arc: '', mechanism: '', genre: '', setting: '', q: '', richOnly: false, origin: '' });
+          if (searchRef.current) searchRef.current.value = '';
+        } catch (err) {
+          setImportMsg({ kind: 'err', text: '导入失败：' + err.message });
+        } finally {
+          setImporting(false);
+          if (importRef.current) importRef.current.value = '';
+          setDragOver(false);
+        }
+      }
+
+      // ---------------- 空态：既无导入库也无生成卡 ----------------
+      if (!status) {
+        return h('div', { className: 'wn-trope-lib' },
+          h('div', { className: 'wn-boundary' }, Spinner(), ' 正在读取热梗库状态…'));
+      }
+      const libraryEmpty = !status.imported && status.generatedCount === 0;
+      if (libraryEmpty) {
+        return h('div', { className: 'wn-trope-lib' },
+          h('div', { className: 'wn-section' },
+            h('h2', { className: 'wn-h2' }, '🔥 热梗库'),
+            h('p', { className: 'wn-tip' },
+              '热梗数据为第三方收录内容，插件不内置、仓库不分发，需要你自行导入 tropes.json 后本地使用。数据仅保存在本机 ~/.dsh/dsh-webnovel/，不会随任何请求上传。')),
+          importMsg && h('p', { className: 'wn-notice ' + (importMsg.kind === 'ok' ? 'ok' : 'err') }, importMsg.text),
+          h('div', { className: 'wn-import-zone' + (dragOver ? ' drag' : '') },
+            h('div', {
+              className: 'wn-import-zone-inner',
+              onClick: () => importRef.current?.click(),
+              onDragOver: (e) => { e.preventDefault(); setDragOver(true); },
+              onDragLeave: () => setDragOver(false),
+              onDrop: (e) => { e.preventDefault(); handleImportFile(e.dataTransfer.files?.[0]); }
+            },
+              h('div', { className: 'wn-upload-icon' }, '📥'),
+              h('div', { className: 'wn-upload-main' },
+                h('strong', null, '导入 tropes.json'),
+                h('span', { className: 'wn-upload-sub' }, '点击选择文件，或把文件拖拽到此处'))),
+            h('p', { className: 'wn-upload-note' },
+              '热梗数据为第三方收录内容，插件不内置、仓库不分发，需要自行导入后本地使用；数据仅保存在本机 ~/.dsh/dsh-webnovel/，不会随请求上传。'),
+            h('p', { className: 'wn-upload-note' },
+              '没有数据文件也没关系——切到「🪄 热梗卡生成」页，可直接用 AI 生成专属热梗卡，生成的卡片同样会进入本库。'),
+            h('input', {
+              ref: importRef, type: 'file', accept: '.json,application/json',
+              style: { display: 'none' },
+              onChange: (e) => handleImportFile(e.target.files?.[0])
+            })),
+          importing && h('p', { className: 'wn-selected-count' }, Spinner(), ' 正在导入并校验…'));
+      }
+
+      // ---------------- 已导入：筛选 + 卡片网格 ----------------
       const facetBlock = (key) => facets && facets[key] && h('div', { className: 'wn-facet-row' },
         h('span', { className: 'wn-facet-label' }, facets[key].label),
         h('div', { className: 'wn-facet-chips' },
@@ -429,20 +581,45 @@ window.__ModuleLoader__.load({
             onClick: () => pickFacet(key, v.name)
           }, v.name, h('em', { className: 'wn-chip-count' }, v.count)))));
 
-      const activeCount = Object.values(filters).filter((v) => v).length;
+      const activeCount = Object.entries(filters).filter(([k, v]) => v && k !== 'q').length + (filters.q ? 1 : 0);
+
+      const originChip = (value, label) => h(Chip, {
+        active: filters.origin === value,
+        onClick: () => setFilters((prev) => ({ ...prev, origin: value }))
+      }, label);
 
       return h('div', { className: 'wn-trope-lib' },
         h('div', { className: 'wn-section' },
           h('div', { className: 'wn-dim-head' },
-            h('h2', { className: 'wn-h2' }, `🔥 热梗库（${meta.total || 240} 条）`),
-            h('label', { className: 'wn-rich-toggle' },
+            h('h2', { className: 'wn-h2' }, `🔥 热梗库（${status.total || total} 条）`),
+            h('div', { className: 'wn-lib-head-actions' },
+              h('label', { className: 'wn-rich-toggle' },
+                h('input', {
+                  type: 'checkbox',
+                  checked: filters.richOnly,
+                  onChange: (e) => setFilters((prev) => ({ ...prev, richOnly: e.target.checked }))
+                }), `仅看富卡片（${status.richCount || 0}）`),
+              h('button', {
+                type: 'button', className: 'wn-btn wn-btn-ghost wn-btn-sm',
+                onClick: () => importRef.current?.click()
+              }, '重新导入'),
+              status.imported && h('a', { className: 'wn-btn wn-btn-ghost wn-btn-sm', href: API + '/tropes/export' }, '导出'),
               h('input', {
-                type: 'checkbox',
-                checked: filters.richOnly,
-                onChange: (e) => setFilters((prev) => ({ ...prev, richOnly: e.target.checked }))
-              }), '仅看富卡片')),
+                ref: importRef, type: 'file', accept: '.json,application/json',
+                style: { display: 'none' },
+                onChange: (e) => handleImportFile(e.target.files?.[0])
+              }))),
           h('p', { className: 'wn-tip' },
-            '数据来源：', meta.source || 'ludan.pro 公开收录', '。富卡片含四件套（动机/底线/反差/动作）、情绪引擎、虐点与高光名场面；点卡片查看详情。'),
+            status.imported
+              ? '导入库为第三方收录数据，仅保存在本机；富卡片含四件套（动机/底线/反差/动作）、情绪引擎、虐点与高光名场面。AI 生成卡带「AI」角标，可删除、可带方向重新生成。点卡片查看详情。'
+              : '当前库中只有 AI 生成卡（带「AI」角标），可删除、可带方向重新生成；导入 tropes.json 后还能检索第三方收录热梗。'),
+          importMsg && h('p', { className: 'wn-notice ' + (importMsg.kind === 'ok' ? 'ok' : 'err') }, importMsg.text),
+          h('div', { className: 'wn-facet-row wn-origin-row' },
+            h('span', { className: 'wn-facet-label' }, '来源'),
+            h('div', { className: 'wn-facet-chips' },
+              originChip('', '全部'),
+              status.imported && originChip('imported', `导入库（${status.total - status.generatedCount}）`),
+              status.generatedCount > 0 && originChip('generated', `AI 生成（${status.generatedCount}）`))),
           h('form', { className: 'wn-search-row', onSubmit: submitSearch },
             h('input', {
               ref: searchRef, type: 'search', className: 'wn-search-input',
@@ -467,7 +644,9 @@ window.__ModuleLoader__.load({
           },
             h('div', { className: 'wn-trope-card-head' },
               h('strong', { className: 'wn-trope-title' }, t.title),
-              t.rich && h('span', { className: 'wn-rich-badge', title: '含四件套/情绪引擎/虐点/高光' }, '富')),
+              h('span', { className: 'wn-badges' },
+                t.origin === 'generated' && h('span', { className: 'wn-ai-badge', title: 'AI 生成卡，可删除/重生成' }, 'AI'),
+                t.rich && h('span', { className: 'wn-rich-badge', title: '含四件套/情绪引擎/虐点/高光' }, '富'))),
             h('p', { className: 'wn-trope-oneline' }, t.oneLine),
             h('div', { className: 'wn-trope-tags' },
               t.arc && h('span', { className: 'wn-tag wn-tag-arc' }, t.arc),
@@ -481,7 +660,13 @@ window.__ModuleLoader__.load({
         !loading && !hasMore && items.length > 0 && h('p', { className: 'wn-selected-count' }, '— 已到底 —'),
         !loading && items.length === 0 && h('div', { className: 'wn-boundary' }, '没有命中的热梗，试试调整筛选或关键词。'),
 
-        h(TropeDetailModal, { trope: detail, onClose: () => setDetail(null) }));
+        h(TropeDetailModal, {
+          trope: detail,
+          onClose: () => setDetail(null),
+          onDelete: (id) => deleteGenerated(id),
+          onRegenerate: (trope) => regenerateFromTrope(trope),
+          dimensionMap
+        }));
     }
 
     // ---------------- 拆文分析面板（原主面板） ----------------
@@ -500,8 +685,11 @@ window.__ModuleLoader__.load({
       const [running, setRunning] = useState(false);
       const [showSettings, setShowSettings] = useState(false);
       const [notice, setNotice] = useState(null);
+      const [historyTip, setHistoryTip] = useState(null);
       const fileRef = useRef(null);
       const runSeq = useRef(0);
+      const resultsRef = useRef({}); // results 的实时镜像，供运行结束后一次性存档
+      const lastRunMeta = useRef(null); // 最近一次运行的元信息，供重试后重新存档
 
       async function refreshProviders() {
         try {
@@ -580,16 +768,17 @@ window.__ModuleLoader__.load({
             body: JSON.stringify({ text: sourceText, dimensionId, providerId })
           });
           if (seq !== runSeq.current) return; // 已有更新的一次运行
-          setResults((prev) => ({
-            ...prev,
-            [dimensionId]: {
-              status: 'done', markdown: data.markdown,
-              elapsedMs: data.elapsedMs, model: data.model
-            }
-          }));
+          const next = {
+            status: 'done', markdown: data.markdown,
+            elapsedMs: data.elapsedMs, model: data.model
+          };
+          resultsRef.current = { ...resultsRef.current, [dimensionId]: next };
+          setResults((prev) => ({ ...prev, [dimensionId]: next }));
         } catch (err) {
           if (seq !== runSeq.current) return;
-          setResults((prev) => ({ ...prev, [dimensionId]: { status: 'error', error: err.message } }));
+          const next = { status: 'error', error: err.message };
+          resultsRef.current = { ...resultsRef.current, [dimensionId]: next };
+          setResults((prev) => ({ ...prev, [dimensionId]: next }));
         }
       }
 
@@ -604,13 +793,61 @@ window.__ModuleLoader__.load({
           return;
         }
         setNotice(null);
+        setHistoryTip(null);
         setRunning(true);
         const seq = ++runSeq.current;
         const sourceText = text;
         const pid = activeProviderId;
         // 全部勾选维度同时发起，谁先返回谁先渲染；单维失败互不影响
         await Promise.allSettled(ids.map((id) => runOne(id, pid, seq, sourceText)));
-        if (seq === runSeq.current) setRunning(false);
+        if (seq !== runSeq.current) return; // 已被更新的运行取代，不存档
+        setRunning(false);
+        // 存档到拆文历史（失败也存，保留错误记录；只发报告与元信息，不发全文）
+        await saveHistoryRun({ ids, sourceText, pid, seq });
+      }
+
+      // 一次运行结束后把结果快照提交到 Host 历史
+      async function saveHistoryRun({ ids, sourceText, pid, seq }) {
+        const snapshot = {};
+        for (const id of ids) {
+          const r = resultsRef.current[id];
+          if (r) snapshot[id] = r;
+        }
+        const items = ids.map((id) => {
+          const dim = dimensions.find((d) => d.id === id);
+          const r = snapshot[id] || { status: 'error', error: '未执行' };
+          return {
+            dimensionId: id,
+            dimensionName: dim?.name || id,
+            status: r.status === 'done' ? 'done' : 'error',
+            markdown: r.markdown || '',
+            error: r.error || '',
+            elapsedMs: r.elapsedMs || 0,
+            model: r.model || ''
+          };
+        });
+        if (!items.some((i) => i.status === 'done')) {
+          setHistoryTip({ type: 'err', text: '本次没有成功的维度，未存入历史。' });
+          return;
+        }
+        const model = items.map((i) => i.model).find(Boolean) || (activeProvider?.model || '');
+        try {
+          await api('/history', {
+            method: 'POST',
+            body: JSON.stringify({
+              fileName,
+              text: sourceText, // Host 只截取前 120 字作预览
+              charCount: [...sourceText].length,
+              providerId: pid,
+              model,
+              items
+            })
+          });
+          lastRunMeta.current = { ids, fileName, sourceText, pid, seq };
+          setHistoryTip({ type: 'ok', text: `已存入拆文历史（${items.filter((i) => i.status === 'done').length} 份报告）。` });
+        } catch (err) {
+          setHistoryTip({ type: 'err', text: '历史保存失败：' + err.message });
+        }
       }
 
       function retryOne(id) {
@@ -707,6 +944,7 @@ window.__ModuleLoader__.load({
 
         h('div', { className: 'wn-action-bar' },
           notice && h('span', { className: 'wn-notice ' + notice.type }, notice.text),
+          historyTip && h('span', { className: 'wn-notice ' + historyTip.type }, historyTip.text),
           h('button', {
             className: 'wn-btn wn-btn-gold wn-btn-start',
             disabled: running || !dimensions.length,
@@ -836,11 +1074,16 @@ window.__ModuleLoader__.load({
       const [activeProviderId, setActiveProviderId] = useState('');
       const [generating, setGenerating] = useState(false);
       const [card, setCard] = useState(null);
+      const [savedId, setSavedId] = useState(null);
+      const [saving, setSaving] = useState(false);
       const [error, setError] = useState(null);
       const [elapsed, setElapsed] = useState(null);
       const [notice, setNotice] = useState(null);
       const [showSettings, setShowSettings] = useState(false);
       const [dimensionMap, setDimensionMap] = useState({});
+      const [direction, setDirection] = useState({ arc: '', mechanism: '', note: '' });
+      const [regenHint, setRegenHint] = useState(null);
+      const noteRef = useRef(null);
 
       useEffect(() => {
         api('/dimensions').then((data) => {
@@ -853,22 +1096,35 @@ window.__ModuleLoader__.load({
           setProviders(data.providers);
           setActiveProviderId(data.activeProviderId);
         }).catch((err) => setNotice('加载供应商失败：' + err.message));
+        // 来自热梗库详情的「带方向重新生成」
+        const off = regenBus.on((payload) => {
+          setDirection((prev) => ({ ...prev, ...(payload.direction || {}) }));
+          setCard(null); setSavedId(null); setError(null);
+          setRegenHint(payload.seedTitle ? `已按「${payload.seedTitle}」预填生成方向，请重新粘贴该卡的素材或新故事点子后再生成。` : '已预填生成方向，请粘贴素材后再生成。');
+          setTimeout(() => noteRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 60);
+        });
+        return off;
       }, []);
 
       const charCount = useMemo(() => [...text].length, [text]);
       const overLimit = charCount > limits.maxChars;
       const activeProvider = providers.find((p) => p.id === activeProviderId);
       const keyReady = !activeProvider || activeProvider.auth === 'none' || activeProvider.configured;
+      const hasDirection = Boolean(direction.arc || direction.mechanism || direction.note.trim());
 
       async function generate() {
         if (!text.trim()) { setError(null); setNotice('请先粘贴故事点子、梗概或小说原文。'); return; }
         if (overLimit) { setError(null); setNotice(`素材超过 ${limits.maxChars} 字上限。`); return; }
         if (!keyReady) { setShowSettings(true); return; }
-        setNotice(null); setError(null); setCard(null); setGenerating(true);
+        setNotice(null); setError(null); setCard(null); setSavedId(null); setGenerating(true);
         try {
           const data = await api('/trope-card', {
             method: 'POST',
-            body: JSON.stringify({ text, providerId: activeProviderId })
+            body: JSON.stringify({
+              text,
+              providerId: activeProviderId,
+              direction: hasDirection ? direction : undefined
+            })
           });
           setCard(data.card);
           setElapsed({ ms: data.elapsedMs, model: data.model });
@@ -876,6 +1132,23 @@ window.__ModuleLoader__.load({
           setError(err.message || '生成失败');
         } finally {
           setGenerating(false);
+        }
+      }
+
+      async function saveCard() {
+        if (!card || saving) return;
+        setSaving(true);
+        try {
+          const data = await api('/tropes/generated', {
+            method: 'POST',
+            body: JSON.stringify({ card })
+          });
+          setSavedId(data.trope.id);
+          setNotice(null);
+        } catch (err) {
+          setNotice('存入热梗库失败：' + err.message);
+        } finally {
+          setSaving(false);
         }
       }
 
@@ -890,6 +1163,37 @@ window.__ModuleLoader__.load({
               h('button', { className: 'wn-btn wn-btn-ghost wn-btn-sm', style: { marginLeft: 8 }, onClick: () => setShowSettings(true) }, '⚙ 设置'))),
           h('p', { className: 'wn-tip' },
             '粘贴一个故事点子、梗概或原文，AI 按热梗库同构 schema 提炼四件套（动机/底线/反差/动作）、情绪引擎、虐点与高光名场面，并给出 6-8 个分析维度下可直接落笔的网文写法。'),
+          regenHint && h('div', { className: 'wn-notice ok wn-regen-hint', ref: noteRef },
+            regenHint,
+            h('button', {
+              className: 'wn-btn wn-btn-ghost wn-btn-sm', style: { marginLeft: 8 },
+              onClick: () => { setRegenHint(null); setDirection({ arc: '', mechanism: '', note: '' }); }
+            }, '清除方向')),
+          h('div', { className: 'wn-direction' },
+            h('div', { className: 'wn-direction-title' }, '🎚 生成方向（可选，不填则由 AI 自由发挥）'),
+            h('div', { className: 'wn-direction-row' },
+              h('label', { className: 'wn-direction-field' },
+                h('span', null, '期望弧线'),
+                h('select', {
+                  value: direction.arc,
+                  onChange: (e) => setDirection((prev) => ({ ...prev, arc: e.target.value }))
+                },
+                  h('option', { value: '' }, '不限'),
+                  ARC_VALUES.map((v) => h('option', { key: v, value: v }, v)))),
+              h('label', { className: 'wn-direction-field' },
+                h('span', null, '期望核心机制'),
+                h('select', {
+                  value: direction.mechanism,
+                  onChange: (e) => setDirection((prev) => ({ ...prev, mechanism: e.target.value }))
+                },
+                  h('option', { value: '' }, '不限'),
+                  MECHANISM_VALUES.map((v) => h('option', { key: v, value: v }, v))))),
+            h('textarea', {
+              className: 'wn-textarea wn-direction-note',
+              placeholder: '自由方向要求，如：要温暖治愈的结尾、女主全程清醒不回头、反派下场要解气…（1200 字以内）',
+              value: direction.note,
+              onChange: (e) => setDirection((prev) => ({ ...prev, note: e.target.value.slice(0, 1200) }))
+            })),
           h('div', { className: 'wn-textarea-head' },
             h('span', null, '素材内容'),
             h('span', { className: overLimit ? 'wn-count wn-bad' : 'wn-count' }, `${charCount} / ${limits.maxChars} 字`)),
@@ -907,7 +1211,7 @@ window.__ModuleLoader__.load({
             className: 'wn-btn wn-btn-gold wn-btn-start',
             disabled: generating,
             onClick: generate
-          }, generating ? '生成中，通常 10-20 秒…' : '✨ 生成热梗卡片')),
+          }, generating ? '生成中，通常 10-20 秒…' : (hasDirection ? '✨ 按指定方向生成' : '✨ 生成热梗卡片'))),
 
         generating && h('div', { className: 'wn-result-card wn-running' },
           h('div', { className: 'wn-result-head' }, h('strong', null, '🃏 热梗卡片'), h('span', { className: 'wn-result-meta' }, Spinner(), ' AI 提炼中…')),
@@ -921,8 +1225,12 @@ window.__ModuleLoader__.load({
           h('button', { className: 'wn-btn wn-btn-ghost wn-btn-sm', onClick: generate }, '重试')),
 
         card && h(GeneratedCard, { card, dimensionMap }),
-        card && elapsed && h('p', { className: 'wn-selected-count' },
-          `生成耗时 ${(elapsed.ms / 1000).toFixed(1)}s · 模型 ${elapsed.model || '-'}`),
+        card && h('div', { className: 'wn-save-row' },
+          savedId
+            ? h('span', { className: 'wn-notice ok' }, '✓ 已存入热梗库，可在「🔥 热梗库」中查看、删除或带方向重新生成。')
+            : h('button', { className: 'wn-btn wn-btn-primary', disabled: saving, onClick: saveCard }, saving ? '保存中…' : '💾 存入热梗库'),
+          elapsed && h('span', { className: 'wn-selected-count' },
+            `生成耗时 ${(elapsed.ms / 1000).toFixed(1)}s · 模型 ${elapsed.model || '-'}`)),
 
         showSettings && h(SettingsModal, {
           providers, activeProviderId, timeoutMs: 180000,
@@ -934,9 +1242,151 @@ window.__ModuleLoader__.load({
         }));
     }
 
+    // ---------------- 拆文历史 ----------------
+    function HistoryPanel() {
+      const [items, setItems] = useState([]);
+      const [total, setTotal] = useState(0);
+      const [page, setPage] = useState(1);
+      const [hasMore, setHasMore] = useState(false);
+      const [loading, setLoading] = useState(true);
+      const [error, setError] = useState(null);
+      const [detail, setDetail] = useState(null);
+      const [detailLoading, setDetailLoading] = useState(false);
+
+      async function loadList(p, append) {
+        setLoading(true); setError(null);
+        try {
+          const data = await api(`/history?page=${p}&pageSize=20`);
+          setItems((prev) => append ? prev.concat(data.items) : data.items);
+          setTotal(data.total); setPage(data.page); setHasMore(data.hasMore);
+        } catch (err) {
+          setError('加载历史失败：' + err.message);
+        } finally {
+          setLoading(false);
+        }
+      }
+      useEffect(() => { loadList(1, false); }, []);
+
+      async function openDetail(id) {
+        setDetailLoading(true); setDetail(null);
+        try {
+          const data = await api('/history/' + encodeURIComponent(id));
+          setDetail(data.run);
+        } catch (err) {
+          setError('打开历史详情失败：' + err.message);
+        } finally {
+          setDetailLoading(false);
+        }
+      }
+
+      async function removeOne(id) {
+        if (!window.confirm('确定删除这条拆文历史？删除后不可恢复。')) return;
+        try {
+          await api('/history/' + encodeURIComponent(id), { method: 'DELETE' });
+          setDetail(null);
+          await loadList(1, false);
+        } catch (err) {
+          setError('删除失败：' + err.message);
+        }
+      }
+
+      async function clearAll() {
+        if (!window.confirm(`确定清空全部 ${total} 条拆文历史？此操作不可恢复。`)) return;
+        try {
+          await api('/history', { method: 'DELETE' });
+          setDetail(null);
+          await loadList(1, false);
+        } catch (err) {
+          setError('清空失败：' + err.message);
+        }
+      }
+
+      function fmtTime(iso) {
+        try {
+          const d = new Date(iso);
+          const pad = (n) => String(n).padStart(2, '0');
+          return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        } catch { return iso; }
+      }
+
+      return h('div', { className: 'wn-trope-lib wn-history' },
+        h('div', { className: 'wn-section' },
+          h('div', { className: 'wn-dim-head' },
+            h('h2', { className: 'wn-h2' }, `🕘 拆文历史（${total}）`),
+            total > 0 && h('div', { className: 'wn-lib-head-actions' },
+              h('button', { type: 'button', className: 'wn-btn wn-btn-ghost wn-btn-sm', onClick: clearAll }, '清空全部'))),
+          h('p', { className: 'wn-tip' },
+            '每次拆文结束后自动保存（至少一个维度成功才存档），本机最多保留 50 次；只存分析报告与原文前 120 字预览，不存全文。')),
+        error && h('p', { className: 'wn-notice err' }, error),
+        loading && items.length === 0 && h('div', { className: 'wn-boundary' }, Spinner(), ' 加载历史…'),
+        !loading && items.length === 0 && h('div', { className: 'wn-boundary' }, '还没有拆文历史，去「📖 拆文分析」跑一次吧。'),
+        h('div', { className: 'wn-history-list' },
+          items.map((r) => h('button', {
+            key: r.id, type: 'button', className: 'wn-history-item',
+            onClick: () => openDetail(r.id)
+          },
+            h('div', { className: 'wn-history-item-head' },
+              h('strong', null, r.fileName || '未命名稿件'),
+              h('span', { className: 'wn-history-time' }, fmtTime(r.createdAt))),
+            r.textPreview && h('p', { className: 'wn-history-preview' }, r.textPreview + (r.charCount > 120 ? '…' : '')),
+            h('div', { className: 'wn-history-meta' },
+              h('span', null, `${r.totalDims} 个维度 · `),
+              h('em', { className: 'wn-key-ok' }, `成功 ${r.okCount}`),
+              r.failCount > 0 && h('em', { className: 'wn-key-miss' }, ` · 失败 ${r.failCount}`),
+              h('span', { className: 'wn-history-model' }, r.model ? ' · ' + r.model : ''))))),
+        !loading && hasMore && h('div', { className: 'wn-loadmore' },
+          h('button', { className: 'wn-btn wn-btn-ghost', onClick: () => loadList(page + 1, true) }, '加载更多')),
+        detailLoading && h('div', { className: 'wn-modal-mask' }, h('div', { className: 'wn-modal' }, Spinner(), ' 打开详情…')),
+        detail && h(HistoryDetailModal, { run: detail, onClose: () => setDetail(null), onDelete: (id) => removeOne(id), fmtTime }));
+    }
+
+    function HistoryDetailModal(props) {
+      const { run, onClose, onDelete, fmtTime } = props;
+      const dimensionMapRef = useRef({});
+      const [ready, setReady] = useState(false);
+      useEffect(() => {
+        api('/dimensions').then((data) => {
+          const map = {};
+          for (const d of data.dimensions) map[d.id] = d;
+          dimensionMapRef.current = map;
+          setReady(true);
+        }).catch(() => setReady(true));
+      }, []);
+      return h('div', { className: 'wn-modal-mask', onClick: onClose },
+        h('div', { className: 'wn-modal wn-history-modal', onClick: (e) => e.stopPropagation() },
+          h('div', { className: 'wn-modal-head' },
+            h('strong', null, run.fileName || '未命名稿件'),
+            h('button', { className: 'wn-modal-x', onClick: onClose, 'aria-label': '关闭' }, '×')),
+          h('div', { className: 'wn-modal-body' },
+            h('p', { className: 'wn-history-modal-meta' },
+              fmtTime(run.createdAt), ' · ', run.charCount, ' 字 · 模型 ', run.model || '-'),
+            run.textPreview && h('div', { className: 'wn-kv' },
+              h('span', { className: 'wn-kv-k' }, '原文预览'),
+              h('p', { className: 'wn-kv-v wn-history-preview' }, run.textPreview + (run.charCount > 120 ? '…' : ''))),
+            run.items.map((it, i) => {
+              const meta = dimensionMapRef.current[it.dimensionId];
+              return h('div', { key: i, className: 'wn-history-report' },
+                h('div', { className: 'wn-history-report-head' },
+                  h('strong', null, (meta?.emoji || '📝'), ' ', it.dimensionName),
+                  it.status === 'done'
+                    ? h('em', { className: 'wn-key-ok' }, '成功 · ' + ((it.elapsedMs / 1000) || 0).toFixed(1) + 's')
+                    : h('em', { className: 'wn-key-miss' }, '失败')),
+                it.status === 'done'
+                  ? h('div', { className: 'wn-md', dangerouslySetInnerHTML: { __html: markdownToHtml(it.markdown) } })
+                  : h('p', { className: 'wn-error-text' }, it.error || '未知错误'));
+            })),
+          h('div', { className: 'wn-modal-actions' },
+            h('button', {
+              type: 'button', className: 'wn-btn wn-btn-ghost wn-btn-sm',
+              onClick: () => onDelete(run.id)
+            }, '🗑 删除此记录'))));
+    }
+
     // ---------------- 主面板：Tab 外壳 ----------------
     function Panel() {
-      const [tab, setTab] = useState('analyze'); // analyze | library | generator
+      const [tab, setTab] = useState('analyze'); // analyze | library | generator | history
+      // 热梗库详情「带方向重新生成」→ 切到生成器页签
+      useEffect(() => regenBus.on(() => setTab('generator')), []);
       return h('div', { className: 'wn-shell' },
         h('div', { className: 'wn-tabbar' },
           h('button', {
@@ -954,11 +1404,17 @@ window.__ModuleLoader__.load({
             className: 'wn-tab' + (tab === 'generator' ? ' active' : ''),
             onClick: () => setTab('generator')
           }, '🃏 热梗卡生成'),
+          h('button', {
+            type: 'button',
+            className: 'wn-tab' + (tab === 'history' ? ' active' : ''),
+            onClick: () => setTab('history')
+          }, '🕘 拆文历史'),
           h('span', { className: 'wn-build' }, BUILD_TAG)),
         h('div', { className: 'wn-tab-body' },
           tab === 'analyze' && h(AnalyzePanel),
           tab === 'library' && h(TropeLibrary),
-          tab === 'generator' && h(TropeCardGenerator)));
+          tab === 'generator' && h(TropeCardGenerator),
+          tab === 'history' && h(HistoryPanel)));
     }
 
     // 侧边栏图标（ownerProps 提供 size/active）
@@ -1004,6 +1460,10 @@ window.__ModuleLoader__.load({
 .wn-upload-main strong { display: block; font-size: 14px; }
 .wn-upload-sub { display: block; font-size: 12px; color: var(--dsw-alias-label-secondary); margin-top: 2px; }
 .wn-upload-link { color: var(--dsw-alias-brand-primary); font-size: 12.5px; margin-top: 8px; display: inline-block; }
+.wn-import-zone { border: 1.5px dashed var(--dsw-alias-border-l2); border-radius: 12px; padding: 40px 22px; text-align: center; cursor: pointer; transition: border-color .15s, background .15s; }
+.wn-import-zone:hover, .wn-import-zone.drag { border-color: var(--dsw-alias-brand-primary); background: var(--dsw-alias-bg-layer-1); }
+.wn-lib-head-actions { display: inline-flex; align-items: center; gap: 8px; }
+.wn-lib-head-actions .wn-btn { text-decoration: none; display: inline-flex; align-items: center; }
 .wn-textarea-head { display:flex; justify-content:space-between; font-size: 12.5px; color: var(--dsw-alias-label-secondary); margin-bottom: 6px; }
 .wn-count { font-variant-numeric: tabular-nums; }
 .wn-count.wn-bad { color: #d4694f; font-weight: 700; }
@@ -1123,7 +1583,35 @@ window.__ModuleLoader__.load({
 .wn-play-cell { border: 1px solid var(--dsw-alias-border-l1); border-left: 3px solid var(--dsw-alias-brand-primary); border-radius: 8px; padding: 10px 13px; background: var(--dsw-alias-bg-layer-1); }
 .wn-play-dim { display:flex; align-items:center; gap: 6px; margin-bottom: 5px; font-size: 13px; }
 .wn-play-cell p { margin: 0; font-size: 13px; line-height: 1.7; white-space: pre-wrap; }
-@media (max-width: 720px) { .wn-kit-grid { grid-template-columns: 1fr; } .wn-trope-grid { grid-template-columns: 1fr; } }
+/* v0.1.3 新增：AI 角标 / 来源筛选 / 方向表单 / 历史 / 空态 */
+.wn-ai-badge { flex-shrink: 0; font-size: 10.5px; font-weight: 700; color: #fff; background: linear-gradient(135deg, #6a8dff, #4f6df5); border-radius: 6px; padding: 1px 6px; }
+.wn-badges { display: inline-flex; gap: 5px; align-items: center; }
+.wn-origin-row { margin-top: 10px; }
+.wn-upload-note { font-size: 12px; color: var(--dsw-alias-label-secondary); line-height: 1.7; margin: 10px 0 0; }
+.wn-import-zone-inner { cursor: pointer; }
+.wn-modal-actions { display: flex; gap: 10px; justify-content: flex-end; padding-top: 12px; border-top: 1px solid var(--dsw-alias-border-l1); margin-top: 14px; }
+.wn-direction { border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px; padding: 14px 16px; margin: 12px 0; background: var(--dsw-alias-bg-layer-1); }
+.wn-direction-title { font-size: 13px; font-weight: 700; color: var(--dsw-alias-label-primary); margin-bottom: 10px; }
+.wn-direction-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 10px; }
+.wn-direction-field { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; color: var(--dsw-alias-label-secondary); }
+.wn-direction-field select { padding: 7px 10px; border-radius: 8px; border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); font-size: 13px; }
+.wn-direction-note { min-height: 64px !important; font-size: 12.5px; }
+.wn-regen-hint { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.wn-save-row { display: flex; align-items: center; gap: 14px; margin-top: 12px; flex-wrap: wrap; }
+.wn-history-list { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+.wn-history-item { text-align: left; background: var(--dsw-alias-bg-base); border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px; padding: 13px 16px; cursor: pointer; color: inherit; font: inherit; transition: border-color .15s, transform .15s; }
+.wn-history-item:hover { border-color: var(--dsw-alias-brand-primary); transform: translateY(-1px); }
+.wn-history-item-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.wn-history-item-head strong { font-size: 13.5px; color: var(--dsw-alias-label-primary); }
+.wn-history-time { font-size: 11.5px; color: var(--dsw-alias-label-secondary); white-space: nowrap; }
+.wn-history-preview { margin: 7px 0; font-size: 12.5px; line-height: 1.65; color: var(--dsw-alias-label-secondary); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.wn-history-meta { font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.wn-history-model { color: var(--dsw-alias-label-secondary); }
+.wn-history-modal { width: min(760px, 94vw); }
+.wn-history-modal-meta { font-size: 12px; color: var(--dsw-alias-label-secondary); margin: 4px 0 12px; }
+.wn-history-report { border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; background: var(--dsw-alias-bg-layer-1); }
+.wn-history-report-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 13.5px; }
+@media (max-width: 720px) { .wn-kit-grid { grid-template-columns: 1fr; } .wn-trope-grid { grid-template-columns: 1fr; } .wn-direction-row { grid-template-columns: 1fr; } }
 `;
 
     function safeStyles(ctx) {
