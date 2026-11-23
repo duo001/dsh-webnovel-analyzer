@@ -1,0 +1,17 @@
+# Node
+node_modules/
+npm-debug.log*
+pnpm-debug.log*
+
+# DSH 本地运行时状态（供应商选择/超时等本地配置，不入库）
+# API Key 由 DSH credentials 服务统一托管（~/.dsh/.credentials.yaml），代码不接触落盘密钥
+.dsh-webnovel/
+
+# 系统/编辑器
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# 本地备忘（不入库）
+NOTES.local.md

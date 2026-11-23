@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Webnovel Analyzer",
+    "description": "Upload a short webnovel manuscript and get multi-dimension analysis reports from configurable LLM providers."
+  }
+}

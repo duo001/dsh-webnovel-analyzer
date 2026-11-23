@@ -1,0 +1,36 @@
+{
+  "name": "@local/webnovel-analyzer",
+  "private": true,
+  "version": "0.1.1",
+  "type": "module",
+  "description": "短篇网文拆文分析工具：上传 .txt 原文，22 个维度并发调用可切换的 OpenAI 兼容大模型，逐维度输出分析报告。",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./dimensions": "./dimensions.js",
+    "./locale/zh.json": "./locale/zh.json",
+    "./locale/en.json": "./locale/en.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "dimensions.js",
+    "sample.txt",
+    "cordis.patch.yml",
+    "locale",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "slots"
+      ]
+    }
+  }
+}
