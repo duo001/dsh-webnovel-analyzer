@@ -12,7 +12,7 @@ window.__ModuleLoader__.load({
     const PANEL_ID = 'webnovel-analyzer';
     const API = '/webnovel';
     // 构建标记：白屏/缓存排查用，硬刷新后标题处应显示该标记
-    const BUILD_TAG = 'v0.1.3';
+    const BUILD_TAG = 'v0.1.4';
 
     // 生成方向词表（与 trope-prompts.js 保持一致）
     const ARC_VALUES = ['世情四段', '渣虐悔追', '受辱反击打脸', '欺觉反爽', '设虐爽胜', '悬疑六段', '纯虐四段', '治愈四段'];
@@ -618,7 +618,7 @@ window.__ModuleLoader__.load({
             h('span', { className: 'wn-facet-label' }, '来源'),
             h('div', { className: 'wn-facet-chips' },
               originChip('', '全部'),
-              status.imported && originChip('imported', `导入库（${status.total - status.generatedCount}）`),
+              status.imported && originChip('imported', `导入库（${status.total}）`),
               status.generatedCount > 0 && originChip('generated', `AI 生成（${status.generatedCount}）`))),
           h('form', { className: 'wn-search-row', onSubmit: submitSearch },
             h('input', {
@@ -782,7 +782,7 @@ window.__ModuleLoader__.load({
         }
       }
 
-      async function startAnalysis(retryIds) {
+      async function startAnalysis(retryIds, opts = {}) {
         if (!text.trim()) { setNotice({ type: 'err', text: '请先上传或粘贴原文。' }); return; }
         if (overLimit) { setNotice({ type: 'err', text: `原文超过 ${limits.maxChars} 字上限。` }); return; }
         const ids = retryIds && retryIds.length ? retryIds : [...selected];
@@ -793,7 +793,7 @@ window.__ModuleLoader__.load({
           return;
         }
         setNotice(null);
-        setHistoryTip(null);
+        if (!opts.skipHistory) setHistoryTip(null);
         setRunning(true);
         const seq = ++runSeq.current;
         const sourceText = text;
@@ -802,6 +802,8 @@ window.__ModuleLoader__.load({
         await Promise.allSettled(ids.map((id) => runOne(id, pid, seq, sourceText)));
         if (seq !== runSeq.current) return; // 已被更新的运行取代，不存档
         setRunning(false);
+        // 单维重试只更新结果，不另存历史（避免历史被重试碎片污染）
+        if (opts.skipHistory) return;
         // 存档到拆文历史（失败也存，保留错误记录；只发报告与元信息，不发全文）
         await saveHistoryRun({ ids, sourceText, pid, seq });
       }
@@ -852,7 +854,7 @@ window.__ModuleLoader__.load({
 
       function retryOne(id) {
         if (running) return;
-        startAnalysis([id]);
+        startAnalysis([id], { skipHistory: true });
       }
 
       // ---------- 渲染 ----------
@@ -1343,14 +1345,12 @@ window.__ModuleLoader__.load({
     function HistoryDetailModal(props) {
       const { run, onClose, onDelete, fmtTime } = props;
       const dimensionMapRef = useRef({});
-      const [ready, setReady] = useState(false);
       useEffect(() => {
         api('/dimensions').then((data) => {
           const map = {};
           for (const d of data.dimensions) map[d.id] = d;
           dimensionMapRef.current = map;
-          setReady(true);
-        }).catch(() => setReady(true));
+        }).catch(() => {});
       }, []);
       return h('div', { className: 'wn-modal-mask', onClick: onClose },
         h('div', { className: 'wn-modal wn-history-modal', onClick: (e) => e.stopPropagation() },
