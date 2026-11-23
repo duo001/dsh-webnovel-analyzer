@@ -12,7 +12,7 @@ window.__ModuleLoader__.load({
     const PANEL_ID = 'webnovel-analyzer';
     const API = '/webnovel';
     // 构建标记：白屏/缓存排查用，硬刷新后标题处应显示该标记
-    const BUILD_TAG = 'v0.1.4';
+    const BUILD_TAG = 'v0.1.5';
 
     // 生成方向词表（与 trope-prompts.js 保持一致）
     const ARC_VALUES = ['世情四段', '渣虐悔追', '受辱反击打脸', '欺觉反爽', '设虐爽胜', '悬疑六段', '纯虐四段', '治愈四段'];
@@ -561,7 +561,7 @@ window.__ModuleLoader__.load({
             h('p', { className: 'wn-upload-note' },
               '热梗数据为第三方收录内容，插件不内置、仓库不分发，需要自行导入后本地使用；数据仅保存在本机 ~/.dsh/dsh-webnovel/，不会随请求上传。'),
             h('p', { className: 'wn-upload-note' },
-              '没有数据文件也没关系——切到「🪄 热梗卡生成」页，可直接用 AI 生成专属热梗卡，生成的卡片同样会进入本库。'),
+              '没有数据文件也没关系——切到「🃏 热梗卡生成」页，可直接用 AI 生成专属热梗卡，生成的卡片同样会进入本库。'),
             h('input', {
               ref: importRef, type: 'file', accept: '.json,application/json',
               style: { display: 'none' },
